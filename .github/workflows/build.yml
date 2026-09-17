@@ -25,22 +25,16 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '${{ matrix.node }}'
-      - name: Get pnpm version from Volta config
-        id: pnpm-version
-        run: echo "version=$(jq -r '.volta.pnpm' package.json)" >> $GITHUB_OUTPUT
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ steps.pnpm-version.outputs.version }}
       - uses: actions/cache@v6
         id: cache
         with:
           path: node_modules
-          key: ${{ runner.os }}-${{ hashFiles('package.json', 'pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-${{ hashFiles('package.json', 'package-lock.json') }}
       - name: Install Dependencies
         if: steps.cache.outputs.cache-hit != 'true'
-        run: pnpm install --frozen-lockfile
+        run: npm ci
       - name: Test
-        run: pnpm test
+        run: npm test
 
   build:
     name: Build
@@ -54,25 +48,19 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: package.json
-      - name: Get pnpm version from Volta config
-        id: pnpm-version
-        run: echo "version=$(jq -r '.volta.pnpm' package.json)" >> $GITHUB_OUTPUT
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ steps.pnpm-version.outputs.version }}
       - uses: actions/cache@v6
         id: cache
         with:
           path: node_modules
-          key: ${{ runner.os }}-${{ hashFiles('package.json', 'pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-${{ hashFiles('package.json', 'package-lock.json') }}
       - name: Install Dependencies
         if: steps.cache.outputs.cache-hit != 'true'
-        run: pnpm install --frozen-lockfile
+        run: npm ci
       - name: Build
         env:
           CRAFT_BUILD_SHA: ${{ github.sha }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-        run: pnpm build
+        run: npm run build
       - name: Smoke Test
         run: ./dist/craft --help
       - name: NPM Pack
@@ -85,34 +73,3 @@ jobs:
             ${{ github.workspace }}/*.tgz
             ${{ github.workspace }}/dist/craft
 
-  docs:
-    name: Build Docs
-    needs: test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version-file: package.json
-      - name: Get pnpm version from Volta config
-        id: pnpm-version
-        run: echo "version=$(jq -r '.volta.pnpm' package.json)" >> $GITHUB_OUTPUT
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ steps.pnpm-version.outputs.version }}
-      - name: Build Docs
-        working-directory: docs
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm build
-      - name: Package Docs
-        run: |
-          cp .nojekyll docs/dist/
-          cd docs/dist && zip -r ../../gh-pages.zip .
-      - name: Upload Docs Artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: craft-docs
-          path: ${{ github.workspace }}/gh-pages.zip

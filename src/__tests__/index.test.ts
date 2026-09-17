@@ -13,7 +13,7 @@ const CLI_BIN = resolve(__dirname, '../../dist/craft');
 beforeAll(() => {
   if (!existsSync(CLI_BIN)) {
     console.log('Building craft binary for e2e tests...');
-    execSync('pnpm build', {
+    execSync('npm run build', {
       cwd: resolve(__dirname, '../..'),
       stdio: 'inherit',
     });

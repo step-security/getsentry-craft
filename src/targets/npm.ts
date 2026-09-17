@@ -960,6 +960,7 @@ export async function getLatestVersion(
       // Works for public packages; private packages will fail and return undefined.
       const spawnOptions: SpawnOptions = {};
       spawnOptions.env = { ...process.env };
+      delete spawnOptions.env['npm_config_userconfig'];
       if (otp) {
         spawnOptions.env.NPM_CONFIG_OTP = otp;
       }
