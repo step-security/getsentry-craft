@@ -1,0 +1,408 @@
+import * as fs from 'fs';
+import * as path from 'path';
+
+import { createGitClient } from '../utils/git';
+
+import { GitHubGlobalConfig, TargetConfig } from '../schemas/project_config';
+import { forEachChained, sleep, withRetry } from '../utils/async';
+import { ConfigurationError } from '../utils/errors';
+import { withTempDir } from '../utils/files';
+import {
+  checkExecutableIsPresent,
+  resolveExecutable,
+  runWithExecutable,
+  spawnProcess,
+} from '../utils/system';
+import { BaseTarget } from './base';
+import { BaseArtifactProvider } from '../artifact_providers/base';
+
+/** Cargo executable configuration */
+const CARGO_CONFIG = {
+  name: 'cargo',
+  envVar: 'CARGO_BIN',
+  errorHint: 'Install cargo or define a custom preReleaseCommand in .craft.yml',
+} as const;
+
+/** Resolved cargo binary path */
+const CARGO_BIN = resolveExecutable(CARGO_CONFIG);
+
+/**
+ * A message fragment emitted by cargo when publishing fails due to a missing
+ * dependency. This sometimes indicates a false positive if the cache has not
+ * been updated.
+ */
+const VERSION_ERROR = 'failed to select a version for the requirement';
+
+/**
+ * Message fragments that likely indicate the crate version is already on
+ * crates.io. This happens especially when rerunning a workspace publish after
+ * it has failed in the middle.
+ */
+const REPUBLISH_ERRORS = [
+  'is already uploaded',
+  'already exists on crates.io index',
+] as const;
+
+function isAlreadyPublishedError(message: string): boolean {
+  return REPUBLISH_ERRORS.some(fragment => message.includes(fragment));
+}
+
+/**
+ * Maximum number of attempts including the initial one when publishing fails
+ * due to a stale cache. After this number of retries, publishing fails.
+ */
+const MAX_ATTEMPTS = 5;
+
+/**
+ * Initial delay to wait between publish retries in seconds. Exponential backoff
+ * is applied to this delay on retries.
+ */
+const RETRY_DELAY_SECS = 2;
+
+/**
+ * Exponential backoff that is applied to the initial retry delay.
+ */
+const RETRY_EXP_FACTOR = 2;
+
+/** Options for "crates" target */
+export interface CratesTargetOptions {
+  /** Crates API token */
+  apiToken: string;
+  /** Whether to use `cargo-hack` and remove dev dependencies */
+  noDevDeps: boolean;
+}
+
+/** A package dependency specification */
+export interface CrateDependency {
+  /** Unique name of the package */
+  name: string;
+  /** The required version range */
+  req: string;
+  /** The dependency kind. "dev", "build", or null for a normal dependency. */
+  kind: string | null;
+}
+
+/** A crate (Rust) package */
+export interface CratePackage {
+  /** Unique identifier containing name, version and location */
+  id: string;
+  /** The unique name of the crate package */
+  name: string;
+  /** The current version of this package */
+  version: string;
+  /** Path to the manifest in the local workspace */
+  manifest_path: string;
+  /** The full list of package dependencies */
+  dependencies: CrateDependency[];
+  /**
+   * A list of registry names allowed for publishing.
+   *
+   * By default, this value is `null`. If this value is an empty array, then
+   * publishing for this crate is disabled (`publish = false` in TOML).
+   */
+  publish: string[] | null;
+}
+
+/** Metadata on a crate workspace */
+export interface CrateMetadata {
+  /** The full list of packages in this workspace */
+  packages: CratePackage[];
+  /** IDs of the packages in this workspace */
+  workspace_members: string[];
+}
+
+/**
+ * Target responsible for publishing releases on Crates.io (Rust packages)
+ */
+export class CratesTarget extends BaseTarget {
+  /** Target name */
+  public readonly name: string = 'crates';
+  /** Target options */
+  public readonly cratesConfig: CratesTargetOptions;
+  /** GitHub repo configuration */
+  public readonly githubRepo: GitHubGlobalConfig;
+
+  /**
+   * Bump version in Cargo.toml using cargo set-version (from cargo-edit).
+   *
+   * @param rootDir - Project root directory
+   * @param newVersion - New version string to set
+   * @returns true if version was bumped, false if no Cargo.toml exists
+   * @throws Error if cargo is not found or command fails
+   */
+  public static async bumpVersion(
+    rootDir: string,
+    newVersion: string,
+  ): Promise<boolean> {
+    const cargoTomlPath = path.join(rootDir, 'Cargo.toml');
+    if (!fs.existsSync(cargoTomlPath)) {
+      return false;
+    }
+
+    try {
+      await runWithExecutable(CARGO_CONFIG, ['set-version', newVersion], {
+        cwd: rootDir,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message.includes('no such command') ||
+        message.includes('no such subcommand')
+      ) {
+        throw new Error(
+          'cargo set-version not found. Install cargo-edit: cargo install cargo-edit',
+        );
+      }
+      throw error;
+    }
+
+    return true;
+  }
+
+  public constructor(
+    config: TargetConfig,
+    artifactProvider: BaseArtifactProvider,
+    githubRepo: GitHubGlobalConfig,
+  ) {
+    super(config, artifactProvider, githubRepo);
+    this.cratesConfig = this.getCratesConfig();
+    checkExecutableIsPresent(CARGO_BIN);
+    this.githubRepo = githubRepo;
+  }
+
+  /**
+   * Extracts Crates target options from the environment
+   */
+  public getCratesConfig(): CratesTargetOptions {
+    if (!process.env.CRATES_IO_TOKEN) {
+      throw new ConfigurationError(
+        `Cannot publish to Crates.io: missing credentials.
+         Please use CRATES_IO_TOKEN environment variable to pass the API token.`,
+      );
+    }
+    return {
+      apiToken: process.env.CRATES_IO_TOKEN,
+      noDevDeps: !!this.config.noDevDeps,
+    };
+  }
+
+  /**
+   * Resolves crate metadata for the project located in the specified directory
+   *
+   * Crate metadata comprises the name and version of the root package, as well as
+   * a flat list of its local dependencies and their respective versions. The full
+   * list of dependencies is not included in this metadata.
+   *
+   * @param directory Path to the root crate / package
+   * @returns An object containing cargo metadata
+   * @async
+   */
+  public async getCrateMetadata(directory: string): Promise<CrateMetadata> {
+    const args = [
+      'metadata',
+      '--manifest-path',
+      `${directory}/Cargo.toml`,
+      '--no-deps',
+      '--format-version=1',
+    ];
+
+    this.logger.info(
+      `Loading workspace information from ${directory}/Cargo.toml`,
+    );
+    const metadata = await spawnProcess(
+      CARGO_BIN,
+      args,
+      {},
+      { enableInDryRunMode: true },
+    );
+    if (!metadata) {
+      throw new ConfigurationError('Empty Cargo metadata!');
+    }
+    return JSON.parse(metadata.toString());
+  }
+
+  /**
+   * Determines the topological order in which to publish crates
+   *
+   * The order is determined by the dependency graph. In order to publish a crate,
+   * all its dependencies have to be available on the index first. Therefore, this
+   * method performs a topological sort of the list of given packages.
+   *
+   * Note that the actual order of packages in the result is indeterministic.
+   * However, the topological order will always be consistent.
+   *
+   * @param packages A list of cargo packages (i.e. crates)
+   * @returns The sorted list of packages
+   */
+  public getPublishOrder(packages: CratePackage[]): CratePackage[] {
+    const remaining = packages.reduce(
+      (dict, p) => {
+        dict[p.name] = p;
+        return dict;
+      },
+      {} as { [index: string]: CratePackage },
+    );
+    const ordered: CratePackage[] = [];
+
+    const isWorkspaceDependency = (dep: CrateDependency) => {
+      // Dev dependencies are not required to publish a crate, regardless of
+      // whether noDevDeps removes them from the package. They must not affect
+      // publication order, including path-only and versioned dependencies.
+      if (dep.kind === 'dev') {
+        return false;
+      }
+
+      return !!remaining[dep.name];
+    };
+
+    // We iterate until there are no packages left. Note that cargo will already
+    // check for cycles in the dependency graph and fail if its not a DAG.
+    while (Object.keys(remaining).length > 0) {
+      const leafDependencies = Object.values(remaining).filter(
+        // Find all packages with no remaining workspace dependencies
+        p => p.dependencies.filter(isWorkspaceDependency).length === 0,
+      );
+
+      if (leafDependencies.length === 0) {
+        throw new Error('Circular dependency detected!');
+      }
+
+      leafDependencies.forEach(next => {
+        ordered.push(next);
+        delete remaining[next.name];
+      });
+    }
+    return ordered;
+  }
+
+  /**
+   * Publishes an entire workspace on crates.io
+   *
+   * If the workspace contains multiple packages with dependencies, they are
+   * published in topological order. This ensures that once a package has been
+   * published, all its requirements are available on the index as well.
+   *
+   * @param directory The path to the root package
+   * @returns A promise that resolves when the workspace has been published
+   */
+  public async publishWorkspace(directory: string): Promise<any> {
+    const metadata = await this.getCrateMetadata(directory);
+    const unorderedCrates = metadata.packages
+      // only publish workspace members
+      .filter(p => metadata.workspace_members.indexOf(p.id) > -1)
+      // skip crates with `"publish": []`
+      .filter(p => !p.publish || p.publish.length);
+
+    const crates = this.getPublishOrder(unorderedCrates);
+    this.logger.debug(
+      `Publishing packages in the following order: ${crates
+        .map(c => c.name)
+        .join(', ')}`,
+    );
+    return forEachChained(crates, async crate => this.publishPackage(crate));
+  }
+
+  /**
+   * Uploads an archive to Crates.io registry using "cargo"
+   *
+   * @param crate The CratePackage object to publish
+   * @returns A promise that resolves when the upload has completed
+   */
+  public async publishPackage(crate: CratePackage): Promise<any> {
+    const args = this.cratesConfig.noDevDeps
+      ? ['hack', 'publish', '--allow-dirty', '--no-dev-deps']
+      : ['publish'];
+
+    args.push(
+      '--no-verify', // Verification should be done on the CI stage
+      '--manifest-path',
+      crate.manifest_path,
+    );
+
+    const env = {
+      ...process.env,
+      CARGO_REGISTRY_TOKEN: this.cratesConfig.apiToken,
+    };
+
+    let delay = RETRY_DELAY_SECS;
+    this.logger.info(`Publishing ${crate.name}`);
+    await withRetry(
+      async () => {
+        try {
+          await spawnProcess(CARGO_BIN, args, { env });
+        } catch (err) {
+          if (err instanceof Error && isAlreadyPublishedError(err.message)) {
+            this.logger.info(
+              `Skipping ${crate.name}, version ${crate.version} already published`,
+            );
+          } else {
+            throw err;
+          }
+        }
+      },
+      MAX_ATTEMPTS,
+
+      async err => {
+        if (!err.message.includes(VERSION_ERROR)) {
+          return false;
+        }
+        this.logger.warn(`Publish failed, trying again in ${delay}s...`);
+        await sleep(delay * 1000);
+        delay *= RETRY_EXP_FACTOR;
+        return true;
+      },
+    );
+  }
+
+  /**
+   * Clones a repository and its submodules.
+   *
+   * @param config Git configuration specifying the repository to clone.
+   * @param revision The commit SHA that should be checked out after the clone.
+   * @param directory The directory to clone into.
+   */
+  public async cloneWithSubmodules(
+    config: GitHubGlobalConfig,
+    revision: string,
+    directory: string,
+  ): Promise<any> {
+    const { owner, repo } = config;
+    const git = createGitClient(directory);
+    const url = `https://github.com/${owner}/${repo}.git`;
+
+    this.logger.info(`Cloning ${owner}/${repo} into ${directory}`);
+    await git.clone(url, directory);
+    await git.checkout(revision);
+
+    this.logger.info(`Checking out submodules`);
+    await git.submoduleUpdate(['--init']);
+
+    // Cargo seems to run into problems if the crate resides within a git
+    // checkout located in a memory file system on Mac (e.g. /tmp). This can be
+    // avoided by signaling to cargo that this is not a git checkout.
+    const gitdir = path.join(directory, '.git');
+    fs.renameSync(gitdir, `${gitdir}.bak`);
+  }
+
+  /**
+   * Uploads all files to Crates.io using Cargo
+   *
+   * Requires twine to be configured in the environment (either beforehand or
+   * via enviroment).
+   *
+   * @param version New version to be released
+   * @param revision Git commit SHA to be published
+   */
+  public async publish(_version: string, revision: string): Promise<any> {
+    await withTempDir(
+      async directory => {
+        await this.cloneWithSubmodules(this.githubRepo, revision, directory);
+        await this.publishWorkspace(directory);
+      },
+      true,
+      'craft-crates-',
+    );
+
+    this.logger.info('Crates release complete');
+  }
+}

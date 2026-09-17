@@ -1,0 +1,290 @@
+import { vi, type Mock } from 'vitest';
+import * as fs from 'fs';
+
+import { logger } from '../../logger';
+import { withTempDir, withTempFile } from '../files';
+
+import {
+  calculateChecksum,
+  extractZipArchive,
+  hasExecutable,
+  HashAlgorithm,
+  HashOutputFormat,
+  replaceEnvVariable,
+  spawnProcess,
+} from '../system';
+
+vi.mock('../../logger');
+
+describe('spawnProcess', () => {
+  test('resolves on success with standard output', async () => {
+    expect.assertions(1);
+    const stdout =
+      (await spawnProcess(process.execPath, ['-e', 'console.log("test")'])) ||
+      '';
+    expect(stdout.toString()).toBe('test\n');
+  });
+
+  test('rejects on non-zero exit code', async () => {
+    try {
+      expect.assertions(2);
+      await spawnProcess(process.execPath, ['-e', 'process.exit(1)']);
+    } catch (e: any) {
+      expect(e.code).toBe(1);
+      expect(e.message).toMatch(/code 1/);
+    }
+  });
+
+  test('rejects on error', async () => {
+    try {
+      expect.assertions(1);
+      await spawnProcess('this_command_does_not_exist');
+    } catch (e: any) {
+      expect(e.message).toMatch(/ENOENT/);
+    }
+  });
+
+  test('attaches args on error', async () => {
+    try {
+      expect.assertions(1);
+      await spawnProcess(process.execPath, ['-e', 'process.exit(1)']);
+    } catch (e: any) {
+      expect(e.args).toEqual(['-e', 'process.exit(1)']);
+    }
+  });
+
+  test('attaches options on error', async () => {
+    try {
+      expect.assertions(1);
+      await spawnProcess(process.execPath, ['-e', 'process.exit(1)'], {
+        cwd: '/tmp/',
+      });
+    } catch (e: any) {
+      expect(e.options.cwd).toEqual('/tmp/');
+    }
+  });
+
+  test('strips env from options on error', async () => {
+    try {
+      expect.assertions(1);
+      await spawnProcess(process.execPath, ['-e', 'process.exit(1)'], {
+        env: { x: '123', password: '456' },
+      });
+    } catch (e: any) {
+      expect(e.options.env).toBeUndefined();
+    }
+  });
+
+  test('does not write to output by default', async () => {
+    const mockedLogInfo = logger.info as Mock;
+
+    await spawnProcess(process.execPath, ['-e', 'console.log("test-string")']);
+
+    expect(mockedLogInfo).toHaveBeenCalledTimes(0);
+  });
+
+  test('writes to output if told so', async () => {
+    const mockedLogInfo = logger.info as Mock;
+
+    await spawnProcess(
+      process.execPath,
+      ['-e', 'process.stdout.write("test-string")'],
+      {},
+      { showStdout: true },
+    );
+
+    expect(mockedLogInfo).toHaveBeenCalledTimes(1);
+    expect(mockedLogInfo.mock.calls[0][0]).toMatch(/test-string/);
+  });
+
+  describe('env sanitisation (defence-in-depth)', () => {
+    const savedEnv = { ...process.env };
+
+    afterEach(() => {
+      process.env = { ...savedEnv };
+    });
+
+    test('strips LD_PRELOAD from an explicit options.env', async () => {
+      const stdout =
+        (await spawnProcess(
+          process.execPath,
+          [
+            '-e',
+            'process.stdout.write(JSON.stringify({ ld: process.env.LD_PRELOAD, marker: process.env.CHILD_MARKER }))',
+          ],
+          {
+            env: {
+              PATH: process.env.PATH,
+              LD_PRELOAD: '/tmp/evil.so',
+              CHILD_MARKER: 'reached',
+            },
+          },
+        )) || '';
+
+      const parsed = JSON.parse(stdout.toString());
+      expect(parsed.ld).toBeUndefined();
+      // Other env vars still propagate.
+      expect(parsed.marker).toBe('reached');
+    });
+
+    test('strips LD_PRELOAD set on process.env after startup', async () => {
+      // Simulate a post-startup mutation of process.env (hostile or
+      // accidental). startup-level sanitizeDynamicLinkerEnv() cannot
+      // catch this; the spawn-level sanitiser must.
+      process.env.LD_PRELOAD = '/tmp/later-evil.so';
+
+      const stdout =
+        (await spawnProcess(process.execPath, [
+          '-e',
+          'process.stdout.write(process.env.LD_PRELOAD || "undef")',
+        ])) || '';
+
+      expect(stdout.toString()).toBe('undef');
+    });
+
+    test('honours CRAFT_ALLOW_DYNAMIC_LINKER_ENV=1 opt-out', async () => {
+      process.env.CRAFT_ALLOW_DYNAMIC_LINKER_ENV = '1';
+
+      const stdout =
+        (await spawnProcess(
+          process.execPath,
+          ['-e', 'process.stdout.write(process.env.LD_PRELOAD || "undef")'],
+          {
+            env: {
+              PATH: process.env.PATH,
+              LD_PRELOAD: '/tmp/allowed.so',
+            },
+          },
+        )) || '';
+
+      expect(stdout.toString()).toBe('/tmp/allowed.so');
+    });
+  });
+});
+
+describe('replaceEnvVariable', () => {
+  test('replaces a variable', async () => {
+    expect(replaceEnvVariable('${ENV_VAR}', { ENV_VAR: '123' })).toBe('123');
+  });
+
+  test('does not replace a variable if there is no curly braces', async () => {
+    expect(replaceEnvVariable('$ENV_VAR', { ENV_VAR: '123' })).toBe('$ENV_VAR');
+  });
+
+  test('replaces a non-existing environment variable with empty string', async () => {
+    expect(replaceEnvVariable('${ENV_VAR}', {})).toBe('');
+  });
+});
+
+describe('calculateChecksum', () => {
+  test('Default checksum on a basic file', async () => {
+    expect.assertions(1);
+
+    await withTempFile(async tmpFilePath => {
+      fs.writeFileSync(tmpFilePath, '\n');
+
+      const checksum = await calculateChecksum(tmpFilePath);
+      expect(checksum).toBe(
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+      );
+    });
+  });
+
+  test('Base64-formatted checksum on a basic file', async () => {
+    expect.assertions(1);
+
+    await withTempFile(async tmpFilePath => {
+      fs.writeFileSync(tmpFilePath, '\n');
+
+      const checksum = await calculateChecksum(tmpFilePath, {
+        format: HashOutputFormat.Base64,
+      });
+      expect(checksum).toBe('AbpHGcgLb+kRsJGnwFEktk7uzpZOCcBY74+YBdrKVGs=');
+    });
+  });
+
+  test('Base64-formatted checksum with custom algorithm on a basic file', async () => {
+    expect.assertions(1);
+
+    await withTempFile(async tmpFilePath => {
+      fs.writeFileSync(tmpFilePath, '\n');
+
+      const checksum = await calculateChecksum(tmpFilePath, {
+        algorithm: HashAlgorithm.SHA384,
+        format: HashOutputFormat.Base64,
+      });
+      expect(checksum).toBe(
+        '7GZOiJ7WwbJ2PKz3iZ2Vt/NHNz65guUjQZ/uo6o2LYkbO/Al8pImelhUBJCReJw+',
+      );
+    });
+  });
+});
+
+describe('isExecutableInPath', () => {
+  test('checks for existing executable', () => {
+    expect(hasExecutable('node')).toBe(true);
+  });
+
+  test('checks for non-existing executable', () => {
+    expect(hasExecutable('not-existing-executable')).toBe(false);
+  });
+
+  test('checks for existing executable using absolute path', () => {
+    expect(hasExecutable(`${process.cwd()}/node_modules/.bin/vitest`)).toBe(
+      true,
+    );
+  });
+
+  test('checks for non-existing executable using absolute path', () => {
+    expect(hasExecutable('/dev/null/non-existing-binary')).toBe(false);
+  });
+
+  test('checks for existing executable using relative path', () => {
+    expect(hasExecutable('./node_modules/.bin/vitest')).toBe(true);
+  });
+
+  test('checks for non-existing executable using relative path', () => {
+    expect(hasExecutable('./bin/non-existing-binary')).toBe(false);
+  });
+});
+
+describe('extractZipArchive', () => {
+  // zip with `t.txt` and `5000` iterations of `f'{string.ascii_letters}\n'}`
+  test('it can extract a larger zip', async () => {
+    await withTempDir(async tmpdir => {
+      const zip = `${tmpdir}/out.zip`;
+
+      // Build the entire zip content in memory to avoid 5000+ individual async
+      // writes which can exceed the test timeout on slow CI runners.
+      const header = Buffer.from([
+        80, 75, 3, 4, 10, 0, 0, 0, 0, 0, 99, 150, 109, 88, 220, 199, 60, 159,
+        40, 11, 4, 0, 40, 11, 4, 0, 5, 0, 28, 0, 116, 46, 116, 120, 116, 85, 84,
+        9, 0, 3, 153, 245, 241, 101, 140, 245, 241, 101, 117, 120, 11, 0, 1, 4,
+        0, 0, 0, 0, 4, 0, 0, 0, 0,
+      ]);
+      const line = Buffer.from(
+        'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\n',
+      );
+      const body = Buffer.alloc(line.length * 5000);
+      for (let i = 0; i < 5000; i += 1) {
+        line.copy(body, i * line.length);
+      }
+      const footer = Buffer.from([
+        80, 75, 1, 2, 30, 3, 10, 0, 0, 0, 0, 0, 99, 150, 109, 88, 220, 199, 60,
+        159, 40, 11, 4, 0, 40, 11, 4, 0, 5, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        164, 129, 0, 0, 0, 0, 116, 46, 116, 120, 116, 85, 84, 5, 0, 3, 153, 245,
+        241, 101, 117, 120, 11, 0, 1, 4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 80, 75, 5,
+        6, 0, 0, 0, 0, 1, 0, 1, 0, 75, 0, 0, 0, 103, 11, 4, 0, 0, 0,
+      ]);
+      await fs.promises.writeFile(zip, Buffer.concat([header, body, footer]));
+
+      await extractZipArchive(zip, `${tmpdir}/out`);
+
+      // should not have corrupted our file
+      const checksum = await calculateChecksum(`${tmpdir}/out/t.txt`);
+      expect(checksum).toBe(
+        '7687e11d941faf48d4cf1692c2473a599ad0d7030e1e5c639a31b2f59cd646ba',
+      );
+    });
+  });
+});
