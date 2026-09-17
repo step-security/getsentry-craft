@@ -4,7 +4,7 @@
   "description": "The universal sentry workflow CLI",
   "main": "dist/craft",
   "repository": "https://github.com/getsentry/craft",
-  "author": "Sentry",
+  "author": "step-security",
   "license": "MIT",
   "bin": {
     "craft": "dist/craft",
