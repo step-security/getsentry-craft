@@ -592,9 +592,7 @@ export async function extractZipArchiveWithFlattening(
  */
 export function catchKeyboardInterrupt(maxTimeDiff = 1000): void {
   if (process.env.CRAFT_CATCH_KEYBOARD_INTERRUPT !== '1') {
-    logger.debug(
-      'Catching Ctrl-C is disabled by default. See https://github.com/getsentry/craft/issues/21',
-    );
+    logger.debug('Catching Ctrl-C is disabled by default.');
     return;
   }
 

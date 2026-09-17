@@ -216,9 +216,9 @@ describe('GitHub Artifact Provider', () => {
               node_id: 'MDg6QXJ0aWZhY3Q2MDIzMzcxMA==',
               name: '1b843f2cbb20fdda99ef749e29e75e43e6e43b38',
               size_in_bytes: 6511029,
-              url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710',
+              url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710',
               archive_download_url:
-                'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710/zip',
+                'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710/zip',
               expired: false,
               created_at: '2021-05-12T21:50:35Z',
               updated_at: '2021-05-12T21:50:38Z',
@@ -229,9 +229,9 @@ describe('GitHub Artifact Provider', () => {
               node_id: 'MDg6QXJ0aWZhY3Q2MDIzMjY5MQ==',
               name: 'e4bcfe450e0460ec5f20b20868664171effef6f9',
               size_in_bytes: 6511029,
-              url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691',
+              url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691',
               archive_download_url:
-                'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691/zip',
+                'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691/zip',
               expired: false,
               created_at: '2021-05-12T21:45:04Z',
               updated_at: '2021-05-12T21:45:07Z',
@@ -246,7 +246,7 @@ describe('GitHub Artifact Provider', () => {
         ),
       ).resolves.toMatchInlineSnapshot(`
               {
-                "archive_download_url": "https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710/zip",
+                "archive_download_url": "https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710/zip",
                 "created_at": "2021-05-12T21:50:35Z",
                 "expired": false,
                 "expires_at": "2021-08-10T21:50:31Z",
@@ -255,7 +255,7 @@ describe('GitHub Artifact Provider', () => {
                 "node_id": "MDg6QXJ0aWZhY3Q2MDIzMzcxMA==",
                 "size_in_bytes": 6511029,
                 "updated_at": "2021-05-12T21:50:38Z",
-                "url": "https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710",
+                "url": "https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710",
               }
             `);
     });
@@ -281,9 +281,9 @@ describe('GitHub Artifact Provider', () => {
                 node_id: 'MDg6QXJ0aWZhY3Q2MDIzMjY5MQ==',
                 name: 'e4bcfe450e0460ec5f20b20868664171effef6f9',
                 size_in_bytes: 6511029,
-                url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691',
+                url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691',
                 archive_download_url:
-                  'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691/zip',
+                  'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691/zip',
                 expired: false,
                 created_at: '2021-05-12T21:45:04Z',
                 updated_at: '2021-05-12T21:45:07Z',
@@ -302,9 +302,9 @@ describe('GitHub Artifact Provider', () => {
                 node_id: 'MDg6QXJ0aWZhY3Q2MDIzMzcxMA==',
                 name: '1b843f2cbb20fdda99ef749e29e75e43e6e43b38',
                 size_in_bytes: 6511029,
-                url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710',
+                url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710',
                 archive_download_url:
-                  'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710/zip',
+                  'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710/zip',
                 expired: false,
                 created_at: '2021-05-12T21:50:35Z',
                 updated_at: '2021-05-12T21:50:38Z',
@@ -319,7 +319,7 @@ describe('GitHub Artifact Provider', () => {
         ),
       ).resolves.toMatchInlineSnapshot(`
               {
-                "archive_download_url": "https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710/zip",
+                "archive_download_url": "https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710/zip",
                 "created_at": "2021-05-12T21:50:35Z",
                 "expired": false,
                 "expires_at": "2021-08-10T21:50:31Z",
@@ -328,7 +328,7 @@ describe('GitHub Artifact Provider', () => {
                 "node_id": "MDg6QXJ0aWZhY3Q2MDIzMzcxMA==",
                 "size_in_bytes": 6511029,
                 "updated_at": "2021-05-12T21:50:38Z",
-                "url": "https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710",
+                "url": "https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710",
               }
             `);
       expect(mockClient.git.getCommit).toBeCalledTimes(1);
@@ -345,9 +345,9 @@ describe('GitHub Artifact Provider', () => {
               node_id: 'MDg6QXJ0aWZhY3Q2MDIzMzcxMA==',
               name: '1b843f2cbb20fdda99ef749e29e75e43e6e43b38',
               size_in_bytes: 6511029,
-              url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710',
+              url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710',
               archive_download_url:
-                'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710/zip',
+                'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710/zip',
               expired: false,
               created_at: '2021-05-12T21:50:35Z',
               updated_at: '2021-05-12T21:50:38Z',
@@ -358,9 +358,9 @@ describe('GitHub Artifact Provider', () => {
               node_id: 'MDg6QXJ0aWZhY3Q2MDIzMjY5MQ==',
               name: '1b843f2cbb20fdda99ef749e29e75e43e6e43b38',
               size_in_bytes: 6511029,
-              url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691',
+              url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691',
               archive_download_url:
-                'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691/zip',
+                'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691/zip',
               expired: false,
               created_at: '2021-05-12T21:45:04Z',
               updated_at: '2021-05-12T21:45:07Z',
@@ -375,7 +375,7 @@ describe('GitHub Artifact Provider', () => {
         ),
       ).resolves.toMatchInlineSnapshot(`
               {
-                "archive_download_url": "https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710/zip",
+                "archive_download_url": "https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710/zip",
                 "created_at": "2021-05-12T21:50:35Z",
                 "expired": false,
                 "expires_at": "2021-08-10T21:50:31Z",
@@ -384,7 +384,7 @@ describe('GitHub Artifact Provider', () => {
                 "node_id": "MDg6QXJ0aWZhY3Q2MDIzMzcxMA==",
                 "size_in_bytes": 6511029,
                 "updated_at": "2021-05-12T21:50:38Z",
-                "url": "https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710",
+                "url": "https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710",
               }
             `);
     });
@@ -421,9 +421,9 @@ describe('GitHub Artifact Provider', () => {
               node_id: 'MDg6QXJ0aWZhY3Q2MDIzMzcxMA==',
               name: '1b843f2cbb20fdda99ef749e29e75e43e6e43b38',
               size_in_bytes: 6511029,
-              url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710',
+              url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710',
               archive_download_url:
-                'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710/zip',
+                'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710/zip',
               expired: false,
               created_at: '2021-05-12T21:50:35Z',
               updated_at: '2021-05-12T21:50:38Z',
@@ -434,9 +434,9 @@ describe('GitHub Artifact Provider', () => {
               node_id: 'MDg6QXJ0aWZhY3Q2MDIzMjY5MQ==',
               name: '1b843f2cbb20fdda99ef749e29e75e43e6e43b38',
               size_in_bytes: 6511029,
-              url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691',
+              url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691',
               archive_download_url:
-                'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691/zip',
+                'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691/zip',
               expired: false,
               created_at: '2021-05-12T21:45:04Z',
               updated_at: '2021-05-12T21:45:07Z',
@@ -470,9 +470,9 @@ describe('GitHub Artifact Provider', () => {
                 node_id: 'MDg6QXJ0aWZhY3Q2MDIzMjY5MQ==',
                 name: 'e4bcfe450e0460ec5f20b20868664171effef6f9',
                 size_in_bytes: 6511029,
-                url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691',
+                url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691',
                 archive_download_url:
-                  'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691/zip',
+                  'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691/zip',
                 expired: false,
                 created_at: '2021-05-12T21:45:04Z',
                 updated_at: '2021-05-12T21:45:07Z',
@@ -491,9 +491,9 @@ describe('GitHub Artifact Provider', () => {
                 node_id: 'MDg6QXJ0aWZhY3Q2MDIzMzcxMA==',
                 name: '1b843f2cbb20fdda99ef749e29e75e43e6e43b38',
                 size_in_bytes: 6511029,
-                url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710',
+                url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710',
                 archive_download_url:
-                  'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710/zip',
+                  'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710/zip',
                 expired: false,
                 created_at: '2021-05-12T21:50:35Z',
                 updated_at: '2021-05-12T21:50:38Z',
@@ -516,7 +516,7 @@ describe('GitHub Artifact Provider', () => {
         ),
       ).resolves.toMatchInlineSnapshot(`
         {
-          "archive_download_url": "https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710/zip",
+          "archive_download_url": "https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710/zip",
           "created_at": "2021-05-12T21:50:35Z",
           "expired": false,
           "expires_at": "2021-08-10T21:50:31Z",
@@ -525,7 +525,7 @@ describe('GitHub Artifact Provider', () => {
           "node_id": "MDg6QXJ0aWZhY3Q2MDIzMzcxMA==",
           "size_in_bytes": 6511029,
           "updated_at": "2021-05-12T21:50:38Z",
-          "url": "https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710",
+          "url": "https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710",
         }
       `);
       expect(mockClient.actions.listArtifactsForRepo).toBeCalledTimes(2);
@@ -545,9 +545,9 @@ describe('GitHub Artifact Provider', () => {
                 node_id: 'MDg6QXJ0aWZhY3Q2MDIzMjY5MQ==',
                 name: 'e4bcfe450e0460ec5f20b20868664171effef6f9',
                 size_in_bytes: 6511029,
-                url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691',
+                url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691',
                 archive_download_url:
-                  'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691/zip',
+                  'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691/zip',
                 expired: false,
                 created_at: '2021-05-12T21:45:04Z',
                 updated_at: '2021-05-12T21:45:07Z',
@@ -566,9 +566,9 @@ describe('GitHub Artifact Provider', () => {
                 node_id: 'MDg6QXJ0aWZhY3Q2MDIzMjY5MQ==',
                 name: 'e4bcfe450e0460ec5f20b20868664171effef6f9',
                 size_in_bytes: 6511029,
-                url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691',
+                url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691',
                 archive_download_url:
-                  'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691/zip',
+                  'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691/zip',
                 expired: false,
                 created_at: '2021-05-12T21:45:04Z',
                 updated_at: '2021-05-12T21:45:07Z',
@@ -587,9 +587,9 @@ describe('GitHub Artifact Provider', () => {
                 node_id: 'MDg6QXJ0aWZhY3Q2MDIzMjY5MQ==',
                 name: 'e4bcfe450e0460ec5f20b20868664171effef6f9',
                 size_in_bytes: 6511029,
-                url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691',
+                url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691',
                 archive_download_url:
-                  'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691/zip',
+                  'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691/zip',
                 expired: false,
                 created_at: '2021-05-12T21:45:04Z',
                 updated_at: '2021-05-12T21:45:07Z',
@@ -625,9 +625,9 @@ describe('GitHub Artifact Provider', () => {
               node_id: 'MDg6QXJ0aWZhY3Q2MDIzMjY5MQ==',
               name: 'e4bcfe450e0460ec5f20b20868664171effef6f9',
               size_in_bytes: 6511029,
-              url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691',
+              url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691',
               archive_download_url:
-                'https://api.github.com/repos/getsentry/craft/actions/artifacts/60232691/zip',
+                'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60232691/zip',
               expired: false,
               created_at: '2020-06-12T21:45:04Z',
               updated_at: '2020-06-12T21:45:07Z',

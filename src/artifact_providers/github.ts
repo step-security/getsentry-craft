@@ -720,8 +720,7 @@ export class GitHubArtifactProvider extends BaseArtifactProvider {
     revision: string,
   ): Promise<RemoteArtifact[]> {
     const artifactsConfig = this.config.artifacts as
-      | GitHubArtifactsConfig
-      | undefined;
+      GitHubArtifactsConfig | undefined;
     const filters = normalizeArtifactsConfig(artifactsConfig);
 
     if (filters.length > 0) {

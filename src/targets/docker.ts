@@ -379,7 +379,7 @@ Please use ${registryHint}DOCKER_USERNAME and DOCKER_PASSWORD environment variab
    *
    * New format:
    *   source: { image: "ghcr.io/org/image", registry: "ghcr.io", usernameVar: "X" }
-   *   target: "getsentry/craft"  # string shorthand
+   *   target: "step-security/getsentry-craft"  # string shorthand
    *
    * Legacy format:
    *   source: "ghcr.io/org/image"

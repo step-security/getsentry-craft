@@ -19,7 +19,7 @@ describe('pypi', () => {
 
   beforeEach(() => {
     process.env.TWINE_USERNAME = '__token__';
-    process.env.TWINE_PASSWORD = 'getsentry/craft:bogus';
+    process.env.TWINE_PASSWORD = 'step-security/getsentry-craft:bogus';
   });
 
   afterAll(() => {

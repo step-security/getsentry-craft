@@ -1,9 +1,9 @@
 {
-  "name": "@sentry/craft",
-  "version": "2.32.0-dev.0",
+  "name": "@step-security/getsentry-craft",
+  "version": "2.32.0",
   "description": "The universal sentry workflow CLI",
   "main": "dist/craft",
-  "repository": "https://github.com/getsentry/craft",
+  "repository": "https://github.com/step-security/getsentry-craft",
   "author": "step-security",
   "license": "MIT",
   "bin": {

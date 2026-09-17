@@ -250,7 +250,7 @@ describe('versionGreaterOrEqualThan', () => {
 describe('getPackage', () => {
   test('reads package.json', () => {
     const pkg = getPackage();
-    expect(pkg.name).toBe('@sentry/craft');
+    expect(pkg.name).toBe('@step-security/getsentry-craft');
   });
 });
 

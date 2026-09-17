@@ -556,7 +556,6 @@ export class NpmTarget extends BaseTarget {
    *
    * No-op if bun.lock is absent or no workspace entries match (logged).
    *
-   * See https://github.com/getsentry/craft/issues/804
    */
   private static patchBunLock(
     rootDir: string,

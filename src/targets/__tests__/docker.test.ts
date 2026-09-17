@@ -39,10 +39,10 @@ describe('normalizeImageRef', () => {
   });
 
   it('normalizes string target to object with image property', () => {
-    const config = { target: 'getsentry/craft' };
+    const config = { target: 'step-security/getsentry-craft' };
     const result = normalizeImageRef(config, 'target');
     expect(result).toEqual({
-      image: 'getsentry/craft',
+      image: 'step-security/getsentry-craft',
       format: undefined,
       registry: undefined,
       usernameVar: undefined,
@@ -90,7 +90,7 @@ describe('normalizeImageRef', () => {
 
   it('uses legacy target params as fallback for string form', () => {
     const config = {
-      target: 'getsentry/craft',
+      target: 'step-security/getsentry-craft',
       targetFormat: '{{{target}}}:v{{{version}}}',
       registry: 'docker.io',
       usernameVar: 'LEGACY_USER',
@@ -98,7 +98,7 @@ describe('normalizeImageRef', () => {
     };
     const result = normalizeImageRef(config, 'target');
     expect(result).toEqual({
-      image: 'getsentry/craft',
+      image: 'step-security/getsentry-craft',
       format: '{{{target}}}:v{{{version}}}',
       registry: 'docker.io',
       usernameVar: 'LEGACY_USER',
@@ -145,7 +145,7 @@ describe('normalizeImageRef', () => {
   });
 
   it('throws ConfigurationError when source is missing', () => {
-    const config = { target: 'getsentry/craft' };
+    const config = { target: 'step-security/getsentry-craft' };
     expect(() => normalizeImageRef(config, 'source')).toThrow(
       "Docker target requires a 'source' property. Please specify the source image.",
     );
@@ -162,7 +162,7 @@ describe('normalizeImageRef', () => {
 describe('extractRegistry', () => {
   it('returns undefined for Docker Hub images (user/image)', () => {
     expect(extractRegistry('user/image')).toBeUndefined();
-    expect(extractRegistry('getsentry/craft')).toBeUndefined();
+    expect(extractRegistry('step-security/getsentry-craft')).toBeUndefined();
   });
 
   it('returns undefined for simple image names', () => {
@@ -172,7 +172,9 @@ describe('extractRegistry', () => {
 
   it('extracts ghcr.io registry', () => {
     expect(extractRegistry('ghcr.io/user/image')).toBe('ghcr.io');
-    expect(extractRegistry('ghcr.io/getsentry/craft')).toBe('ghcr.io');
+    expect(extractRegistry('ghcr.io/step-security/getsentry-craft')).toBe(
+      'ghcr.io',
+    );
   });
 
   it('extracts gcr.io and regional variants', () => {
@@ -191,7 +193,9 @@ describe('extractRegistry', () => {
   it('treats docker.io variants as Docker Hub (returns undefined)', () => {
     // docker.io is the canonical Docker Hub registry
     expect(extractRegistry('docker.io/library/nginx')).toBeUndefined();
-    expect(extractRegistry('docker.io/getsentry/craft')).toBeUndefined();
+    expect(
+      extractRegistry('docker.io/step-security/getsentry-craft'),
+    ).toBeUndefined();
     // index.docker.io is the legacy Docker Hub registry
     expect(extractRegistry('index.docker.io/library/nginx')).toBeUndefined();
     // registry-1.docker.io is another Docker Hub alias
@@ -575,7 +579,7 @@ describe('DockerTarget', () => {
           {
             name: 'docker',
             source: 'ghcr.io/org/image',
-            target: 'getsentry/craft',
+            target: 'step-security/getsentry-craft',
           },
           new NoneArtifactProvider(),
         );
@@ -599,7 +603,7 @@ describe('DockerTarget', () => {
           {
             name: 'docker',
             source: 'ghcr.io/org/image',
-            target: 'docker.io/getsentry/craft',
+            target: 'docker.io/step-security/getsentry-craft',
           },
           new NoneArtifactProvider(),
         );
@@ -623,7 +627,7 @@ describe('DockerTarget', () => {
           {
             name: 'docker',
             source: 'ghcr.io/org/image',
-            target: 'index.docker.io/getsentry/craft',
+            target: 'index.docker.io/step-security/getsentry-craft',
           },
           new NoneArtifactProvider(),
         );
@@ -690,7 +694,7 @@ describe('DockerTarget', () => {
               {
                 name: 'docker',
                 source: 'ghcr.io/org/image',
-                target: 'getsentry/craft',
+                target: 'step-security/getsentry-craft',
               },
               new NoneArtifactProvider(),
             ),
@@ -750,7 +754,7 @@ describe('DockerTarget', () => {
         {
           name: 'docker',
           source: 'ghcr.io/org/image',
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
         },
         new NoneArtifactProvider(),
       );
@@ -801,7 +805,7 @@ describe('DockerTarget', () => {
         {
           name: 'docker',
           source: 'ghcr.io/org/image',
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
           sourceUsernameVar: 'MY_SOURCE_USER',
           sourcePasswordVar: 'MY_SOURCE_PASS',
         },
@@ -827,7 +831,7 @@ describe('DockerTarget', () => {
             {
               name: 'docker',
               source: 'ghcr.io/org/image',
-              target: 'getsentry/craft',
+              target: 'step-security/getsentry-craft',
               sourceUsernameVar: 'MY_SOURCE_USER',
             },
             new NoneArtifactProvider(),
@@ -844,7 +848,7 @@ describe('DockerTarget', () => {
         {
           name: 'docker',
           source: 'ghcr.io/org/public-image',
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
         },
         new NoneArtifactProvider(),
       );
@@ -863,7 +867,7 @@ describe('DockerTarget', () => {
         {
           name: 'docker',
           source: 'us.gcr.io/project/image',
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
           sourceRegistry: 'gcr.io', // Use gcr.io creds for us.gcr.io
         },
         new NoneArtifactProvider(),
@@ -926,14 +930,16 @@ describe('DockerTarget', () => {
             image: 'ghcr.io/org/source-image',
           },
           target: {
-            image: 'getsentry/craft',
+            image: 'step-security/getsentry-craft',
           },
         },
         new NoneArtifactProvider(),
       );
 
       expect(target.dockerConfig.source.image).toBe('ghcr.io/org/source-image');
-      expect(target.dockerConfig.target.image).toBe('getsentry/craft');
+      expect(target.dockerConfig.target.image).toBe(
+        'step-security/getsentry-craft',
+      );
     });
 
     it('uses registry from object config', () => {
@@ -965,7 +971,7 @@ describe('DockerTarget', () => {
           name: 'docker',
           source: 'ghcr.io/org/source-image',
           target: {
-            image: 'getsentry/craft',
+            image: 'step-security/getsentry-craft',
             usernameVar: 'MY_TARGET_USER',
             passwordVar: 'MY_TARGET_PASS',
           },
@@ -993,7 +999,7 @@ describe('DockerTarget', () => {
             format: '{{{source}}}:sha-{{{revision}}}',
           },
           target: {
-            image: 'getsentry/craft',
+            image: 'step-security/getsentry-craft',
             format: '{{{target}}}:v{{{version}}}',
           },
         },
@@ -1022,7 +1028,7 @@ describe('DockerTarget', () => {
             usernameVar: 'MY_SOURCE_USER',
             passwordVar: 'MY_SOURCE_PASS',
           },
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
         },
         new NoneArtifactProvider(),
       );
@@ -1071,7 +1077,7 @@ describe('DockerTarget', () => {
         {
           name: 'docker',
           source: 'ghcr.io/org/image',
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
         },
         new NoneArtifactProvider(),
       );
@@ -1094,7 +1100,7 @@ describe('DockerTarget', () => {
         {
           name: 'docker',
           source: 'ghcr.io/org/image',
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
         },
         new NoneArtifactProvider(),
       );
@@ -1118,7 +1124,7 @@ describe('DockerTarget', () => {
         {
           name: 'docker',
           source: 'ghcr.io/org/image',
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
         },
         new NoneArtifactProvider(),
       );
@@ -1156,7 +1162,7 @@ describe('DockerTarget', () => {
         {
           name: 'docker',
           source: 'ghcr.io/org/public-image',
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
         },
         new NoneArtifactProvider(),
       );
@@ -1230,7 +1236,7 @@ describe('DockerTarget', () => {
             image: 'us.gcr.io/project/image',
             skipLogin: true, // Auth handled externally
           },
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
         },
         new NoneArtifactProvider(),
       );
@@ -1354,7 +1360,7 @@ describe('DockerTarget', () => {
         {
           name: 'docker',
           source: 'gcr.io/project/image',
-          target: 'getsentry/craft',
+          target: 'step-security/getsentry-craft',
         },
         new NoneArtifactProvider(),
       );

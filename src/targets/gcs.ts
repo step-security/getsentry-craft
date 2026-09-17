@@ -227,9 +227,8 @@ export class GcsTarget extends BaseTarget {
     // before we can upload the artifacts to our target, we first need to
     // download them from the artifact provider
     const localFilePaths = await Promise.all(
-      artifacts.map(
-        async (artifact: RemoteArtifact): Promise<string> =>
-          this.artifactProvider.downloadArtifact(artifact),
+      artifacts.map(async (artifact: RemoteArtifact): Promise<string> =>
+        this.artifactProvider.downloadArtifact(artifact),
       ),
     );
 

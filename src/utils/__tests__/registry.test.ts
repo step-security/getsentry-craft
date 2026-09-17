@@ -161,7 +161,7 @@ describe('getPackageManifest', () => {
     it('works with APP type packages', async () => {
       const initialData: InitialManifestData = {
         canonical: 'app:craft',
-        repoUrl: 'https://github.com/getsentry/craft',
+        repoUrl: 'https://github.com/step-security/getsentry-craft',
         name: 'Craft',
         // mainDocsUrl omitted — falls back to repoUrl
       };
@@ -180,9 +180,9 @@ describe('getPackageManifest', () => {
 
       expect(result.packageManifest).toEqual({
         canonical: 'app:craft',
-        repo_url: 'https://github.com/getsentry/craft',
+        repo_url: 'https://github.com/step-security/getsentry-craft',
         name: 'Craft',
-        main_docs_url: 'https://github.com/getsentry/craft',
+        main_docs_url: 'https://github.com/step-security/getsentry-craft',
       });
     });
 

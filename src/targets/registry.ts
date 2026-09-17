@@ -147,8 +147,7 @@ export class RegistryTarget extends BaseTarget {
     const items = Object.entries(BATCH_KEYS).flatMap(([key, type]) =>
       Object.entries(
         (typedConfig[key as keyof RegistryTargetConfigFields] as
-          | Record<string, unknown>
-          | undefined) || {},
+          Record<string, unknown> | undefined) || {},
       ).map(([canonicalName, conf]) => {
         const config = conf as RegistryConfig | null;
         const result = Object.assign(Object.create(null), config, {

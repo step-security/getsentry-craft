@@ -87,7 +87,6 @@ export class NugetTarget extends BaseTarget {
     if (hasExecutable(NUGET_DOTNET_BIN)) {
       // `dotnet-setversion` operates in cwd and will pickup global.json,
       // which breaks if the pinned SDK isn't installed on the craft runner.
-      // See: https://github.com/getsentry/craft/issues/819
       const globalJsonPath = join(rootDir, 'global.json');
       const globalJsonBackup = `${globalJsonPath}.craft-bak-${randomUUID()}`;
       const globalJsonMoved = existsSync(globalJsonPath);
