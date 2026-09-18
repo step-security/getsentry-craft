@@ -1,0 +1,21 @@
+coverage/
+dist/*
+!dist/craft
+node_modules/
+
+# Docs build artifacts
+docs/dist/
+docs/node_modules/
+docs/.astro/
+
+yarn-error.log
+npm-debug.log
+
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+*.env
+.eslintcache
+.tsbuildinfo
+.idea

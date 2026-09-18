@@ -1,0 +1,45 @@
+minVersion: '2.14.0'
+changelog:
+  policy: auto
+artifactProvider:
+  name: github
+  config:
+    artifacts:
+      Build & Test:
+        - craft-binary
+        - craft-docs
+preReleaseCommand: >-
+  node -p "
+    const {execSync} = require('child_process');
+    execSync('npm --no-git-tag-version version ' + process.env.CRAFT_NEW_VERSION).toString();
+  "
+postReleaseCommand: >-
+  node -p "
+    const {execSync} = require('child_process');
+    execSync('npm --no-git-tag-version version preminor --preid=dev');
+    execSync('git diff --quiet || git commit -anm \'meta: Bump new development version\\n\\n#skip-changelog\' && git pull --rebase && git push').toString();"
+requireNames:
+  - /^sentry-craft.*\.tgz$/
+  - /^craft$/
+targets:
+  - name: npm
+  - name: gcs
+    includeNames: /^.*craft.*$/
+    bucket: sentry-sdk-assets
+    paths:
+      - path: /craft/{{version}}/
+        metadata:
+          cacheControl: 'public, max-age=2592000'
+      - path: /craft/latest/
+        metadata:
+          cacheControl: 'public, max-age=300'
+  - name: registry
+    apps:
+      'app:craft':
+        urlTemplate: 'https://downloads.sentry-cdn.com/craft/{{version}}/{{file}}'
+        checksums:
+          - algorithm: sha256
+            format: hex
+  - name: github
+    floatingTags:
+      - 'v{major}'

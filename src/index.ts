@@ -1,0 +1,139 @@
+#!/usr/bin/env node
+// Import Sentry instrumentation first, before any other code
+import './instrument';
+
+import isCI from 'is-ci';
+import yargs from 'yargs';
+
+import { logger, LogLevel } from './logger';
+import {
+  sanitizeDynamicLinkerEnv,
+  warnIfCraftEnvFileExists,
+} from './utils/env';
+import {
+  envToBool,
+  setGlobals,
+  extractWorkspaceSelection,
+} from './utils/helpers';
+import { getPackageVersion } from './utils/version';
+import { withTracing } from './utils/tracing';
+import { setActiveWorkspace } from './config';
+
+// Commands
+import * as prepare from './commands/prepare';
+import * as publish from './commands/publish';
+import * as targets from './commands/targets';
+import * as config from './commands/config';
+import * as artifacts from './commands/artifacts';
+import * as changelog from './commands/changelog';
+import * as workspace from './commands/workspace';
+
+function printVersion(): void {
+  if (!process.argv.includes('-v') && !process.argv.includes('--version')) {
+    // Print the current version
+    logger.debug(`craft ${getPackageVersion()}`);
+  }
+}
+
+const GLOBAL_BOOLEAN_FLAGS = {
+  'no-input': {
+    coerce: envToBool,
+    default: isCI,
+    describe: 'Suppresses all user prompts',
+    global: true,
+  },
+  'dry-run': {
+    coerce: envToBool,
+    // TODO(byk): Deprecate this in favor of CRAFT_DRY_RUN
+    default: process.env.DRY_RUN,
+    global: true,
+    describe: 'Dry run mode: no file writes, commits, pushes, or API mutations',
+  },
+};
+
+/**
+ * This function is to pre-process and fix one of yargs' shortcomings:
+ * We want to use some flags as booleans: just their existence on the CLI should
+ * set them to true. That said since we also allow setting them through
+ * environment variables, we need to parse many string values that would set
+ * them to false. Moreover, we want to be able to override already-set env
+ * variables with the `--flag=no` kind of notation (using the `=` symbol) but
+ * not via the positional argument notation (`--flag no`). The only way to do
+ * this is to define them as string arguments and then _inject_ a truthy string
+ * if we notice the flag is passed standalone (ie `--flag`).
+ * @param argv The raw process.argv array
+ * @returns The processed, injected version of the argv array to pass to yargs
+ */
+function fixGlobalBooleanFlags(argv: string[]): string[] {
+  const result = [];
+  for (const arg of argv) {
+    result.push(arg);
+    if (arg.slice(2) in GLOBAL_BOOLEAN_FLAGS) {
+      result.push('1');
+    }
+  }
+  return result;
+}
+
+/**
+ * Main entrypoint
+ */
+async function main(): Promise<void> {
+  // Strip dynamic-linker env vars (LD_PRELOAD, DYLD_*, ...) before anything
+  // else so they cannot leak into subprocesses Craft spawns.
+  sanitizeDynamicLinkerEnv();
+
+  printVersion();
+
+  warnIfCraftEnvFileExists();
+
+  const argv = fixGlobalBooleanFlags(process.argv.slice(2));
+
+  // Resolve the active workspace BEFORE parsing. yargs runs command `builder`s
+  // (which may read the configuration, e.g. `publish` derives its --target
+  // choices from config.targets) *before* middleware, so setting the workspace
+  // via middleware would be too late — the builder would resolve/validate the
+  // config without a selection and fail. We therefore extract --workspace (or
+  // CRAFT_WORKSPACE) from the raw argv/env up front, which is the single source
+  // of truth for the selection (see extractWorkspaceSelection for precedence).
+  setActiveWorkspace(extractWorkspaceSelection(argv));
+
+  await yargs()
+    .parserConfiguration({
+      'boolean-negation': false,
+    })
+    .env('CRAFT')
+    .command(prepare)
+    .command(publish)
+    .command(targets)
+    .command(config)
+    .command(artifacts)
+    .command(changelog)
+    .command(workspace)
+    .demandCommand()
+    .version(getPackageVersion())
+    .alias('v', 'version')
+    .help()
+    .alias('h', 'help')
+    .options(GLOBAL_BOOLEAN_FLAGS)
+    .option('log-level', {
+      default: 'Info',
+      choices: Object.keys(LogLevel).filter(level => isNaN(Number(level))),
+      coerce: level => level[0].toUpperCase() + level.slice(1).toLowerCase(),
+      describe: 'Logging level',
+      global: true,
+    })
+    .option('workspace', {
+      type: 'string',
+      describe:
+        'Select a named workspace (release unit) from the configuration. ' +
+        'Required when the config defines "workspaces". Env: CRAFT_WORKSPACE',
+      global: true,
+    })
+    .strictCommands()
+    .showHelpOnFail(true)
+    .middleware(setGlobals)
+    .parse(argv);
+}
+
+withTracing(main, { name: 'craft.cli', op: 'cli' })();
