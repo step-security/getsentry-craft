@@ -1,0 +1,46 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /src/utils/__fixtures__/workspaces/no-workspace
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /src/utils/__fixtures__/workspaces/npm-workspace
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /src/utils/__fixtures__/workspaces/npm-workspace/packages/pkg-a
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /src/utils/__fixtures__/workspaces/npm-workspace/packages/pkg-b
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /src/utils/__fixtures__/workspaces/pnpm-workspace
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /src/utils/__fixtures__/workspaces/pnpm-workspace/packages/pkg-a
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /src/utils/__fixtures__/workspaces/pnpm-workspace/packages/pkg-b
+    schedule:
+      interval: daily
