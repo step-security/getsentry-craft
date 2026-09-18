@@ -3,4 +3,7 @@ dist/
 node_modules/
 package-lock.json
 temp_*/
+.github/workflows/codeql.yml
+.github/workflows/scorecards.yml
+.pre-commit-config.yaml
 
