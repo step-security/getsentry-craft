@@ -93,8 +93,8 @@ describe('GitHub Artifact Provider', () => {
 
     githubArtifactProvider = new TestGitHubArtifactProvider({
       name: 'github-test',
-      repoOwner: 'getsentry',
-      repoName: 'craft',
+      repoOwner: 'step-security',
+      repoName: 'getsentry-craft',
     });
 
     mockedSleep = sleep as Mock;
@@ -674,8 +674,8 @@ describe('GitHub Artifact Provider', () => {
       expect(runs[0].name).toBe('Build & Test');
       expect(runs[1].name).toBe('Lint');
       expect(mockClient.actions.listWorkflowRunsForRepo).toBeCalledWith({
-        owner: 'getsentry',
-        repo: 'craft',
+        owner: 'step-security',
+        repo: 'getsentry-craft',
         head_sha: 'abc123',
         per_page: 100,
         page: 1,

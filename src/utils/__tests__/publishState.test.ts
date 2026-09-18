@@ -45,11 +45,11 @@ describe('publishState', () => {
     test('includes owner, repo, short cwd hash, and version', () => {
       const name = getPublishStateFilename(
         '1.2.3',
-        { owner: 'getsentry', repo: 'craft' },
+        { owner: 'step-security', repo: 'getsentry-craft' },
         cwd,
       );
       expect(name).toMatch(
-        /^publish-state-getsentry-craft-[0-9a-f]{12}-1\.2\.3\.json$/,
+        /^publish-state-step-security-getsentry-craft-[0-9a-f]{12}-1\.2\.3\.json$/,
       );
     });
 

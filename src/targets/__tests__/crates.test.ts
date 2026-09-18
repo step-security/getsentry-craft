@@ -38,7 +38,7 @@ describe('getPublishOrder', () => {
       noDevDeps: true,
     },
     new NoneArtifactProvider(),
-    { owner: 'getsentry', repo: 'craft' },
+    { owner: 'step-security', repo: 'getsentry-craft' },
   );
 
   test('sorts crate packages properly', () => {
@@ -84,7 +84,7 @@ describe('getPublishOrder', () => {
         noDevDeps: false,
       },
       new NoneArtifactProvider(),
-      { owner: 'getsentry', repo: 'craft' },
+      { owner: 'step-security', repo: 'getsentry-craft' },
     );
     const packages = ['p1', 'p2'].map(cratePackageFactory);
     const [p1, p2] = packages;

@@ -24,14 +24,16 @@ import { logger } from '../logger';
 
 describe('validateConfiguration', () => {
   test('parses minimal configuration', () => {
-    const data = { github: { owner: 'getsentry', repo: 'craft' } };
+    const data = {
+      github: { owner: 'step-security', repo: 'getsentry-craft' },
+    };
 
     expect(validateConfiguration(data)).toEqual(data);
   });
 
   test('parses configuration with targets', () => {
     const data = {
-      github: { owner: 'getsentry', repo: 'craft' },
+      github: { owner: 'step-security', repo: 'getsentry-craft' },
       targets: [{ name: 'npm' }, { name: 'github', tagPrefix: 'v' }],
     };
 
@@ -74,7 +76,7 @@ describe('validateConfiguration', () => {
 
   test('fails with invalid github config', () => {
     expect(() =>
-      validateConfiguration({ github: { owner: 'getsentry' } }),
+      validateConfiguration({ github: { owner: 'step-security' } }),
     ).toThrow(/repo.*Required/);
   });
 
@@ -94,7 +96,7 @@ describe('validateConfiguration', () => {
 describe('CraftProjectConfigSchema', () => {
   test('schema validates correct config', () => {
     const data = {
-      github: { owner: 'getsentry', repo: 'craft' },
+      github: { owner: 'step-security', repo: 'getsentry-craft' },
       minVersion: '2.14.0',
     };
 
@@ -124,7 +126,9 @@ describe('noMerge config', () => {
   });
 
   test('noMerge defaults to undefined when not specified', () => {
-    const data = { github: { owner: 'getsentry', repo: 'craft' } };
+    const data = {
+      github: { owner: 'step-security', repo: 'getsentry-craft' },
+    };
     const result = validateConfiguration(data);
     expect(result.noMerge).toBeUndefined();
   });
@@ -230,7 +234,7 @@ describe('getGitTagPrefix', () => {
     loadConfigurationFromString(
       [
         'github:',
-        '  owner: getsentry',
+        '  owner: step-security',
         '  repo: craft',
         'targets:',
         ...targets.map(t => `  - ${JSON.stringify(t)}`),
@@ -329,7 +333,9 @@ describe('workspaces', () => {
   test('backward compatible: no workspaces, no selection resolves normally', () => {
     setActiveWorkspace(undefined);
     loadConfigurationFromString(
-      ['github:', '  owner: getsentry', '  repo: craft'].join('\n'),
+      ['github:', '  owner: step-security', '  repo: getsentry-craft'].join(
+        '\n',
+      ),
     );
     expect(getActiveWorkspace()).toBeUndefined();
   });
@@ -633,7 +639,9 @@ describe('workspaces', () => {
     setActiveWorkspace('cli');
     expect(() =>
       loadConfigurationFromString(
-        ['github:', '  owner: getsentry', '  repo: craft'].join('\n'),
+        ['github:', '  owner: step-security', '  repo: getsentry-craft'].join(
+          '\n',
+        ),
       ),
     ).toThrow(/no "workspaces" are defined/);
   });

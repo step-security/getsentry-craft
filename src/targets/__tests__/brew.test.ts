@@ -111,7 +111,7 @@ describe('formula name templating', () => {
   test('repo name with version template', () => {
     const brewTarget = getBrewTarget(
       { formula: undefined },
-      { owner: 'getsentry', repo: 'craft-v{{{major}}}' },
+      { owner: 'step-security', repo: 'craft-v{{{major}}}' },
     );
     const resolved = brewTarget.resolveFormulaName('2.5.0');
     expect(resolved).toBe('craft-v2');

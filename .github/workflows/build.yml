@@ -55,18 +55,6 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: npm ci
       - name: Build
-        env:
-          CRAFT_BUILD_SHA: ${{ github.sha }}
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
         run: npm run build
       - name: Smoke Test
         run: ./dist/craft --help
-      - name: NPM Pack
-        run: npm pack
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: craft-binary
-          path: |
-            ${{ github.workspace }}/*.tgz
-            ${{ github.workspace }}/dist/craft
