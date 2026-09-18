@@ -170,7 +170,7 @@ test.each([
   (_name, workspace) => {
     const environment = createActionEnvironment();
 
-    expect(getActionSteps()[0]?.name).toBe('Validate workspace');
+    expect(getActionSteps()[0]?.name).toBe('Subscription check');
     expect(
       runActionStep('Validate workspace', workspace, environment).status,
     ).toBe(1);
