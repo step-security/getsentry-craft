@@ -170484,7 +170484,7 @@ globstar while`, file, fr3, pattern, pr3, swallowee), this.matchOne(file.slice(f
       S_IFDIR = 16384, S_IFLNK = 40960, S_IFMT = 61440;
     } });
     var lambda_exports = {};
-    __export2(lambda_exports, { Lambda: () => Lambda2, createLambda: () => createLambda, createZip: () => createZip, getLambdaOptionsFromFunction: () => getLambdaOptionsFromFunction, sanitizeConsumerName: () => sanitizeConsumerName });
+    __export2(lambda_exports, { Lambda: () => Lambda2, createLambda: () => createLambda, createZip: () => createZip, findMatchingFunction: () => findMatchingFunction, getLambdaOptionsFromFunction: () => getLambdaOptionsFromFunction, sanitizeConsumerName: () => sanitizeConsumerName });
     function sanitizeConsumerName(functionPath) {
       let result = "";
       for (let char of functionPath) char === "_" ? result += "__" : char === "/" ? result += "_S" : char === "." ? result += "_D" : /[A-Za-z0-9-]/.test(char) ? result += char : result += "_" + char.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0");
@@ -170527,23 +170527,18 @@ globstar while`, file, fr3, pattern, pr3, swallowee), this.matchOne(file.slice(f
         zipFile.end(), streamToBuffer(zipFile.outputStream).then(resolve32).catch(reject);
       });
     }
-    async function getLambdaOptionsFromFunction({ sourceFile, config }) {
-      if (config?.functions) {
-        let serviceName = typeof config.serviceName == "string" && config.serviceName !== "" ? config.serviceName : void 0;
-        for (let [pattern, fn2] of Object.entries(config.functions)) if (sourceFile === pattern || (0, import_minimatch8.default)(sourceFile, pattern)) {
-          let consumer = sanitizeConsumerName(serviceName ? `${serviceName}~${pattern}` : pattern), experimentalTriggers = fn2.experimentalTriggers?.map((trigger) => trigger.type === "queue/v2beta" ? { ...trigger, consumer } : trigger);
-          if (experimentalTriggers && experimentalTriggers.length > 1 && experimentalTriggers.some((t3) => t3.type === "queue/v2beta")) throw new Error(`functions["${pattern}"].experimentalTriggers can only have one item for queue/v2beta`);
-          return { architecture: fn2.architecture, memory: fn2.memory, maxDuration: fn2.maxDuration, affinity: fn2.affinity, maxConcurrency: fn2.maxConcurrency, regions: fn2.regions, functionFailoverRegions: fn2.functionFailoverRegions, experimentalTriggers, supportsCancellation: fn2.supportsCancellation };
-        }
+    function findMatchingFunction(functions, candidates) {
+      if (functions) {
+        for (let sourceFile of candidates) for (let [pattern, functionConfig] of Object.entries(functions)) if (sourceFile === pattern || (0, import_minimatch8.default)(sourceFile, pattern)) return { sourceFile, pattern, functionConfig };
       }
     }
     async function getLambdaOptionsFromFunction({ sourceFile, config, isScheduleEntrypoint = false }) {
-      let match2 = findMatchingFunction(config?.functions, [sourceFile]);
-      if (match2) {
-        let { pattern, functionConfig: fn } = match2, serviceName = typeof config?.serviceName == "string" && config.serviceName !== "" ? config.serviceName : void 0, consumer = sanitizeConsumerName(serviceName ? `${serviceName}~${pattern}` : pattern), experimentalTriggers = fn.experimentalTriggers?.map((trigger) => trigger.type === "queue/v2beta" ? { ...trigger, consumer } : trigger);
-        if (experimentalTriggers && experimentalTriggers.length > 1 && experimentalTriggers.some((t2) => t2.type === "queue/v2beta")) throw new Error(`functions["${pattern}"].experimentalTriggers can only have one item for queue/v2beta`);
+      let match3 = findMatchingFunction(config?.functions, [sourceFile]);
+      if (match3) {
+        let { pattern, functionConfig: fn2 } = match3, serviceName = typeof config?.serviceName == "string" && config.serviceName !== "" ? config.serviceName : void 0, consumer = sanitizeConsumerName(serviceName ? `${serviceName}~${pattern}` : pattern), experimentalTriggers = fn2.experimentalTriggers?.map((trigger) => trigger.type === "queue/v2beta" ? { ...trigger, consumer } : trigger);
+        if (experimentalTriggers && experimentalTriggers.length > 1 && experimentalTriggers.some((t3) => t3.type === "queue/v2beta")) throw new Error(`functions["${pattern}"].experimentalTriggers can only have one item for queue/v2beta`);
         if (isScheduleEntrypoint && experimentalTriggers !== void 0 && !(experimentalTriggers.length === 1 && experimentalTriggers[0]?.type === "schedule/v1beta")) throw new Error(`functions["${pattern}"].experimentalTriggers conflicts with the schedule entrypoint trigger`);
-        return { architecture: fn.architecture, memory: fn.memory, maxDuration: fn.maxDuration, affinity: fn.affinity, maxConcurrency: fn.maxConcurrency, regions: fn.regions, functionFailoverRegions: fn.functionFailoverRegions, experimentalTriggers: isScheduleEntrypoint ? [{ type: "schedule/v1beta" }] : experimentalTriggers, supportsCancellation: fn.supportsCancellation };
+        return { architecture: fn2.architecture, memory: fn2.memory, maxDuration: fn2.maxDuration, affinity: fn2.affinity, maxConcurrency: fn2.maxConcurrency, regions: fn2.regions, functionFailoverRegions: fn2.functionFailoverRegions, experimentalTriggers: isScheduleEntrypoint ? [{ type: "schedule/v1beta" }] : experimentalTriggers, supportsCancellation: fn2.supportsCancellation };
       }
       return isScheduleEntrypoint ? { experimentalTriggers: [{ type: "schedule/v1beta" }] } : {};
     }
@@ -179868,13 +179863,13 @@ ${entrypointsForMessage}`);
       INTERNAL_SERVICE_PREFIX = "/_svc";
     } });
     var schedule_path_utils_exports = {};
-    __export3(schedule_path_utils_exports, { SCHEDULE_FUNCTION_PREFIX: () => SCHEDULE_FUNCTION_PREFIX, getScheduleFunctionPath: () => getScheduleFunctionPath });
+    __export2(schedule_path_utils_exports, { SCHEDULE_FUNCTION_PREFIX: () => SCHEDULE_FUNCTION_PREFIX, getScheduleFunctionPath: () => getScheduleFunctionPath });
     function getScheduleFunctionPath(entrypointSegments) {
       if (entrypointSegments.length === 0 || entrypointSegments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\"))) throw new Error("Schedule function paths require safe, non-empty segments");
       return [SCHEDULE_FUNCTION_PREFIX, ...entrypointSegments].join("/");
     }
     var SCHEDULE_FUNCTION_PREFIX;
-    var init_schedule_path_utils = __esm3({ "src/schedule-path-utils.ts"() {
+    var init_schedule_path_utils = __esm2({ "src/schedule-path-utils.ts"() {
       "use strict";
       SCHEDULE_FUNCTION_PREFIX = "_vercel/schedules";
     } });
@@ -180624,6 +180619,7 @@ ${invalidRuntimes.map(({ name, lambda }) => `  - ${name} (${lambda.runtime})`).j
     var import_node_entrypoint;
     var load_import_node_entrypoint = () => import_node_entrypoint ??= (init_node_entrypoint(), __toCommonJS2(node_entrypoint_exports));
     __reExport(stdin_exports, (init_service_path_utils(), __toCommonJS2(service_path_utils_exports)), module2.exports);
+    __reExport(stdin_exports, (init_schedule_path_utils(), __toCommonJS2(schedule_path_utils_exports)), module2.exports);
     var import_get_encrypted_env_file2;
     var load_import_get_encrypted_env_file = () => import_get_encrypted_env_file2 ??= (init_get_encrypted_env_file(), __toCommonJS2(get_encrypted_env_file_exports));
     var import_get_lambda_environment2;
