@@ -1,7 +1,19 @@
 import { vi } from 'vitest';
-import { getLatestTag, isRepoDirty, findReleaseBranches } from '../git';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  createGitClient,
+  getGitClient,
+  getChangesSince,
+  getLatestTag,
+  isRepoDirty,
+  findReleaseBranches,
+} from '../git';
 import * as loggerModule from '../../logger';
 import type { StatusResult } from 'simple-git';
+import { setActiveWorkspace } from '../../config';
 
 describe('getLatestTag', () => {
   it('returns latest tag in the repo by calling `git describe`', async () => {
@@ -62,6 +74,241 @@ describe('getLatestTag', () => {
 
     const latestTag = await getLatestTag(git, 'mcp@');
     expect(latestTag).toBe('');
+  });
+});
+
+describe('getGitClient', () => {
+  it('preserves Git identity environment variables for commits', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-git-identity-'));
+    const previousDirectory = process.cwd();
+    const identity = {
+      GIT_AUTHOR_NAME: 'Craft Author',
+      GIT_AUTHOR_EMAIL: 'author@example.com',
+      GIT_COMMITTER_NAME: 'Craft Committer',
+      GIT_COMMITTER_EMAIL: 'committer@example.com',
+    };
+    const previousEnvironment = Object.fromEntries(
+      Object.keys(identity).map(key => [key, process.env[key]]),
+    );
+
+    try {
+      Object.assign(process.env, identity);
+      const setupGit = createGitClient(dir);
+      await setupGit.init();
+      writeFileSync(join(dir, '.craft.yml'), 'minVersion: "2.0.0"\n');
+      process.chdir(dir);
+      const git = await getGitClient();
+      await git.addConfig('user.useConfigOnly', 'true');
+      await git.addConfig('user.name', '');
+      await git.addConfig('user.email', '');
+      await git.addConfig('commit.gpgsign', 'false');
+      writeFileSync(join(dir, 'identity.txt'), 'identity\n');
+      await git.add('identity.txt');
+      await git.commit('commit using environment identity');
+
+      const identityResult = await git.show([
+        '-s',
+        '--format=%an <%ae>|%cn <%ce>',
+      ]);
+      expect(identityResult.trim()).toBe(
+        'Craft Author <author@example.com>|Craft Committer <committer@example.com>',
+      );
+    } finally {
+      process.chdir(previousDirectory);
+      for (const [key, value] of Object.entries(previousEnvironment)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('getChangesSince', () => {
+  it('includes commits in a first release with no previous tag', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-first-release-'));
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-C', dir, ...args], {
+        env: {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: '/dev/null',
+          GIT_CONFIG_NOSYSTEM: '1',
+        },
+      });
+
+    try {
+      git('init', '--quiet');
+      git('config', 'user.name', 'Craft Test');
+      git('config', 'user.email', 'craft-test@example.com');
+      writeFileSync(join(dir, 'entry.md'), 'first\n');
+      git('add', 'entry.md');
+      git(
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '--quiet',
+        '-m',
+        'First change',
+      );
+      git('tag', 'cli@0.1.0');
+      writeFileSync(join(dir, 'entry.md'), 'second\n');
+      git('add', 'entry.md');
+      git(
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '--quiet',
+        '-m',
+        'Second change',
+      );
+
+      const client = createGitClient(dir);
+      expect(
+        (await getChangesSince(client, '')).map(({ title }) => title),
+      ).toEqual(['Second change', 'First change']);
+      expect(
+        (await getChangesSince(client, '', 'cli@0.1.0')).map(
+          ({ title }) => title,
+        ),
+      ).toEqual(['First change']);
+      expect(
+        (await getChangesSince(client, 'cli@0.1.0')).map(({ title }) => title),
+      ).toEqual(['Second change']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('includes shared and selected workspace changes, with optional related paths', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-changelog-workspaces-'));
+    const previousDirectory = process.cwd();
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-C', dir, ...args], {
+        env: {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: '/dev/null',
+          GIT_CONFIG_NOSYSTEM: '1',
+        },
+      });
+    const commit = (
+      file: string,
+      title: string,
+      additionalFiles: string[] = [],
+    ) => {
+      writeFileSync(join(dir, file), title);
+      git('add', '--', file, ...additionalFiles);
+      git('-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', title);
+    };
+
+    try {
+      git('init', '--quiet');
+      git('config', 'user.name', 'Craft Test');
+      git('config', 'user.email', 'craft-test@example.com');
+      for (const workspace of [
+        'packages/cli',
+        'packages/mcp',
+        'apps/cli-docs',
+        'apps/cli-docs-extra',
+      ]) {
+        mkdirSync(join(dir, workspace), { recursive: true });
+        writeFileSync(
+          join(dir, workspace, 'package.json'),
+          JSON.stringify({ name: workspace }),
+        );
+      }
+      mkdirSync(join(dir, 'docs'));
+      writeFileSync(
+        join(dir, '.craft.yml'),
+        'minVersion: 2.29.0\nworkspaces:\n  packages/cli:\n    changelog:\n      policy: auto\n  packages/mcp: {}\n',
+      );
+      writeFileSync(
+        join(dir, 'pnpm-workspace.yaml'),
+        'packages:\n  - packages/*\n  - apps/*\n',
+      );
+      git('add', '.');
+      git('-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'initial');
+      git('tag', 'cli@0.1.0');
+      commit('packages/cli/cli.ts', 'cli change');
+      commit('packages/mcp/mcp.ts', 'mcp change');
+      commit('apps/cli-docs/site.ts', 'cli docs change');
+      commit('apps/cli-docs-extra/site.ts', 'other docs change');
+      commit('docs/readme.md', 'unowned docs change');
+      commit('root.txt', 'root change');
+      writeFileSync(join(dir, 'packages/cli/cli.ts'), 'shared change');
+      commit('packages/mcp/mcp.ts', 'both change', ['packages/cli/cli.ts']);
+
+      process.chdir(dir);
+      setActiveWorkspace('packages/cli');
+      const client = createGitClient(dir);
+      const titles = async () =>
+        (await getChangesSince(client, 'cli@0.1.0')).map(({ title }) => title);
+
+      expect(await titles()).toEqual([
+        'both change',
+        'root change',
+        'unowned docs change',
+        'cli change',
+      ]);
+      expect(
+        (await getChangesSince(client, '', 'cli@0.1.0')).map(
+          ({ title }) => title,
+        ),
+      ).toEqual(['initial']);
+
+      setActiveWorkspace('packages/mcp');
+      expect(await titles()).toEqual([
+        'both change',
+        'root change',
+        'unowned docs change',
+        'mcp change',
+      ]);
+      setActiveWorkspace('packages/cli');
+
+      writeFileSync(
+        join(dir, '.craft.yml'),
+        'minVersion: 2.29.0\nworkspaces:\n  packages/cli:\n    changelog:\n      policy: auto\n      includePaths:\n        - apps/cli-docs\n  packages/mcp: {}\n',
+      );
+      setActiveWorkspace('packages/cli');
+      expect(await titles()).toEqual([
+        'both change',
+        'root change',
+        'unowned docs change',
+        'cli docs change',
+        'cli change',
+      ]);
+
+      git('mv', 'packages/cli/cli.ts', 'packages/mcp/moved.ts');
+      git(
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '--quiet',
+        '-m',
+        'moved across workspaces',
+      );
+      commit('packages/cli/line\nbreak.ts', 'newline filename');
+      expect(await titles()).toEqual([
+        'newline filename',
+        'moved across workspaces',
+        'both change',
+        'root change',
+        'unowned docs change',
+        'cli docs change',
+        'cli change',
+      ]);
+      setActiveWorkspace('packages/mcp');
+      expect((await titles()).slice(0, 2)).toEqual([
+        'moved across workspaces',
+        'both change',
+      ]);
+    } finally {
+      setActiveWorkspace(undefined);
+      process.chdir(previousDirectory);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

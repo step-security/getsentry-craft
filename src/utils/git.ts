@@ -1,15 +1,24 @@
-import simpleGit, {
+import {
+  simpleGit,
   type SimpleGit,
   type LogOptions,
   type Options,
   type StatusResult,
 } from 'simple-git';
 
-import { getConfigFileDir } from '../config';
+import {
+  getActiveWorkspace,
+  getChangelogConfig,
+  getConfigFileDir,
+  getWorkspaceNames,
+} from '../config';
 import { ConfigurationError } from './errors';
 import { createDryRunGit } from './dryRun';
+import { GIT_IDENTITY_ENV } from './gitIdentityEnv';
 import { logger } from '../logger';
 import { distance as levenshtein } from 'fastest-levenshtein';
+import path from 'node:path';
+import { discoverWorkspaces } from './workspaces';
 
 export interface GitChange {
   hash: string;
@@ -101,16 +110,86 @@ export async function getChangesSince(
     file: '.',
   };
 
-  if (rev) {
-    gitLogArgs.from = rev;
-  }
-  const { all: commits } = await git.log(gitLogArgs);
-  return commits.map(commit => ({
+  // simple-git interprets `to` without `from` as HEAD..HEAD and returns no
+  // commits. A first release has no previous tag, so log the full history.
+  const { all: commits } = rev
+    ? await git.log({ ...gitLogArgs, from: rev })
+    : await git.log(['--no-merges', until || 'HEAD', '--', '.']);
+  const changes = commits.map(commit => ({
     hash: commit.hash,
     title: commit.message,
     body: commit.body,
     pr: commit.message.match(PRExtractor)?.[0] || null,
   }));
+  const workspace = getActiveWorkspace();
+  if (!workspace || changes.length === 0) {
+    return changes;
+  }
+
+  const root = getConfigFileDir() || process.cwd();
+  const discovered = await discoverWorkspaces(root);
+  const ownedPaths = new Set(getWorkspaceNames());
+  for (const pkg of discovered.packages) {
+    const relative = path
+      .relative(root, pkg.location)
+      .split(path.sep)
+      .join('/');
+    if (relative === '' || relative === '..' || relative.startsWith('../')) {
+      throw new ConfigurationError(
+        `Workspace package is outside the repository: ${pkg.name}`,
+      );
+    }
+    ownedPaths.add(relative);
+  }
+  const orderedOwners = [...ownedPaths].sort(
+    (left, right) => right.length - left.length,
+  );
+  const { includePaths } = getChangelogConfig();
+  const contains = (directory: string, file: string) =>
+    file === directory || file.startsWith(`${directory}/`);
+
+  // NUL-delimited filenames remain unambiguous even when they contain spaces
+  // or newlines. Disabling renames includes both sides of a moved file.
+  const raw = await git.raw([
+    'log',
+    '--no-merges',
+    '--no-renames',
+    '--format=%x00%x00%H%x00',
+    '--name-only',
+    '-z',
+    '--end-of-options',
+    rev ? `${rev}..${until || 'HEAD'}` : until || 'HEAD',
+    '--',
+    '.',
+  ]);
+  const sections = raw.split(/\0\0([a-f0-9]{40})\0\0\n/g);
+  if (sections[0] !== '' || sections.length !== commits.length * 2 + 1) {
+    throw new Error('Could not parse the changelog commit paths');
+  }
+  const pathsByHash = new Map<string, string[]>();
+  for (const index of commits.keys()) {
+    const sectionIndex = index * 2 + 1;
+    const hash = sections[sectionIndex];
+    const names = sections[sectionIndex + 1];
+    if (hash === undefined || names === undefined || !names.endsWith('\0')) {
+      throw new Error('Could not parse the changelog commit paths');
+    }
+    pathsByHash.set(hash, names.slice(0, -1).split('\0'));
+  }
+
+  return changes.filter(commit => {
+    const files = pathsByHash.get(commit.hash);
+    if (!files) {
+      throw new Error(`Missing changelog paths for commit ${commit.hash}`);
+    }
+    return files.some(file => {
+      if (includePaths.some(directory => contains(directory, file))) {
+        return true;
+      }
+      const owner = orderedOwners.find(directory => contains(directory, file));
+      return owner === undefined || owner === workspace;
+    });
+  });
 }
 
 export function stripRemoteName(
@@ -132,7 +211,9 @@ export async function getGitClient(): Promise<SimpleGit> {
   logger.debug('Working directory:', process.cwd());
 
   // eslint-disable-next-line no-restricted-syntax -- This is the git wrapper module
-  const git = simpleGit(configFileDir);
+  const git = simpleGit(configFileDir, {
+    allowEnvironment: GIT_IDENTITY_ENV,
+  });
   const isRepo = await git.checkIsRepo();
   if (!isRepo) {
     throw new ConfigurationError('Not in a git repository!');
@@ -151,8 +232,10 @@ export async function getGitClient(): Promise<SimpleGit> {
  * @returns A SimpleGit instance wrapped with dry-run support
  */
 export function createGitClient(directory: string): SimpleGit {
-  // eslint-disable-next-line no-restricted-syntax -- This is the git wrapper module
-  return createDryRunGit(simpleGit(directory));
+  return createDryRunGit(
+    // eslint-disable-next-line no-restricted-syntax -- This is the git wrapper module
+    simpleGit(directory, { allowEnvironment: GIT_IDENTITY_ENV }),
+  );
 }
 
 /**
@@ -238,7 +321,7 @@ export async function findReleaseBranches(
 
   try {
     await git.fetch();
-  } catch (_err) {
+  } catch {
     logger.debug('Failed to fetch from remote, using locally cached refs');
   }
 
@@ -246,7 +329,7 @@ export async function findReleaseBranches(
   try {
     const output = await git.raw('branch', '-r');
     allBranches = parseGitBranchOutput(output);
-  } catch (_err) {
+  } catch {
     logger.debug('Failed to list remote branches');
     return { exactMatches: [], fuzzyMatches: [] };
   }
