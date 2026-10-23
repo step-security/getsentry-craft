@@ -28,7 +28,7 @@ index HASH..HASH 100644
 [info] Checking the local repository status...
 [info] Releasing version 1.0.1 from DEFAULT_BRANCH
 [info] Preparing to release the version: 1.0.1
-[info] [dry-run] Creating temporary worktree at /var/folders/p6/89_9c5mj7gq5_vk_ppfv92pm0000gn/T/craft-dry-run-HASH
+[info] [dry-run] Creating temporary worktree at /tmp/craft-XXXXX
 [info] Created a new release branch: "release/1.0.1"
 [info] Switched to branch "release/1.0.1"
 [info] Running the pre-release command...
@@ -43,7 +43,7 @@ exports[`prepare --dry-run e2e > produces consistent output format > dry-run-out
 "[info] Checking the local repository status...
 [info] Releasing version 1.0.1 from DEFAULT_BRANCH
 [info] Preparing to release the version: 1.0.1
-[info] [dry-run] Creating temporary worktree at /var/folders/p6/89_9c5mj7gq5_vk_ppfv92pm0000gn/T/craft-dry-run-HASH
+[info] [dry-run] Creating temporary worktree at /tmp/craft-XXXXX
 [info] Created a new release branch: "release/1.0.1"
 [info] Switched to branch "release/1.0.1"
 [warn] Not running the pre-release command: no command specified

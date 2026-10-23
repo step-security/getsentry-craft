@@ -165,7 +165,8 @@ function normalizeOutput(output: string): string {
       .replace(/\(Use `node --trace-warnings.*\n/g, '')
       .replace(/\(Use `node --trace-deprecation.*\n/g, '')
       .replace(/Support for loading ES Module.*\n/g, '')
-      // Normalize temp directory paths
+      // Normalize temp directory paths (macOS: /var/folders/.../T/craft-*, Linux: /tmp/craft-*)
+      .replace(/\/var\/folders\/\S+\/T\/craft-[a-z0-9-]+/g, '/tmp/craft-XXXXX')
       .replace(/\/tmp\/craft-[a-z0-9-]+/g, '/tmp/craft-XXXXX')
       // Normalize commit hashes (7-40 hex chars)
       .replace(/\b[a-f0-9]{7,40}\b/g, 'HASH')
