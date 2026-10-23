@@ -13,7 +13,7 @@ import { resolve, join } from 'path';
 import { mkdtemp, rm, writeFile, readFile, mkdir, chmod } from 'fs/promises';
 import { existsSync } from 'fs';
 import { tmpdir } from 'os';
-import simpleGit from 'simple-git';
+import { simpleGit } from 'simple-git';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,6 +33,7 @@ const CLI_ENV: Record<string, string> = {
 
 // Path to the built CLI binary - e2e tests use the actual artifact
 const CLI_BIN = resolve(__dirname, '../../dist/craft');
+const remoteDirs = new Set<string>();
 
 // Ensure the binary is built before running e2e tests
 beforeAll(() => {
@@ -52,7 +53,15 @@ beforeAll(() => {
  * - .craft.yml configuration
  * - CHANGELOG.md file
  */
-async function createTestRepo(): Promise<string> {
+async function createBareRemote(): Promise<string> {
+  const remoteDir = await mkdtemp(join(tmpdir(), 'craft-e2e-remote-'));
+  remoteDirs.add(remoteDir);
+  // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+  await simpleGit(remoteDir).init(true);
+  return remoteDir;
+}
+
+async function createTestRepo(preReleaseCommand = ''): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), 'craft-e2e-'));
   // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
   const git = simpleGit(tempDir);
@@ -73,7 +82,7 @@ github:
   repo: test-repo
 changelog:
   policy: none
-preReleaseCommand: ""
+preReleaseCommand: "${preReleaseCommand}"
 targets: []
 `;
   await writeFile(join(tempDir, '.craft.yml'), craftConfig);
@@ -113,16 +122,31 @@ targets: []
   await git.commit('fix: Fix bar issue');
 
   // Create a bare remote repo to satisfy git remote operations
-  const remoteDir = await mkdtemp(join(tmpdir(), 'craft-e2e-remote-'));
-  // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
-  const remoteGit = simpleGit(remoteDir);
-  await remoteGit.init(true); // bare repo
+  const remoteDir = await createBareRemote();
   await git.addRemote('origin', remoteDir);
   // Push the main branch to set up tracking
   const status = await git.status();
   await git.push('origin', status.current!, ['--set-upstream']);
 
   return tempDir;
+}
+
+async function runCliExpectFailure(
+  cwd: string,
+  args: string[],
+  env: Record<string, string> = CLI_ENV,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return execFileAsync(CLI_BIN, args, { cwd, env }).then(
+    () => {
+      throw new Error('Expected craft command to fail');
+    },
+    error =>
+      error as {
+        code: number;
+        stdout: string;
+        stderr: string;
+      },
+  );
 }
 
 /**
@@ -141,7 +165,8 @@ function normalizeOutput(output: string): string {
       .replace(/\(Use `node --trace-warnings.*\n/g, '')
       .replace(/\(Use `node --trace-deprecation.*\n/g, '')
       .replace(/Support for loading ES Module.*\n/g, '')
-      // Normalize temp directory paths
+      // Normalize temp directory paths (macOS: /var/folders/.../T/craft-*, Linux: /tmp/craft-*)
+      .replace(/\/var\/folders\/\S+\/T\/craft-[a-z0-9-]+/g, '/tmp/craft-XXXXX')
       .replace(/\/tmp\/craft-[a-z0-9-]+/g, '/tmp/craft-XXXXX')
       // Normalize commit hashes (7-40 hex chars)
       .replace(/\b[a-f0-9]{7,40}\b/g, 'HASH')
@@ -165,6 +190,12 @@ describe('prepare --dry-run e2e', () => {
     if (tempDir) {
       await rm(tempDir, { recursive: true, force: true });
     }
+    await Promise.all(
+      Array.from(remoteDirs, remoteDir =>
+        rm(remoteDir, { recursive: true, force: true }),
+      ),
+    );
+    remoteDirs.clear();
   });
 
   test('creates worktree, operates within it, and cleans up', async () => {
@@ -262,6 +293,204 @@ describe('prepare --dry-run e2e', () => {
     expect(normalizedOutput).toMatchSnapshot('dry-run-output');
   }, 60000);
 
+  test('stops before preparing an existing remote release branch', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    const currentBranch = (await git.status()).current!;
+    const outputPath = join(tempDir, 'github-output');
+
+    await git.checkoutLocalBranch('release/1.0.1');
+    const releaseSha = (await git.revparse(['HEAD'])).trim();
+    await git.push('origin', 'release/1.0.1');
+    await git.checkout(currentBranch);
+    await git.deleteLocalBranch('release/1.0.1');
+
+    const result = await runCliExpectFailure(
+      tempDir,
+      ['prepare', '1.0.1', '--dry-run', '--no-input'],
+      { ...CLI_ENV, GITHUB_OUTPUT: outputPath },
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.stdout + result.stderr).toContain(
+      'A release for version 1.0.1 is already pending. Resume and publish it before preparing another release.',
+    );
+    expect(result.stdout + result.stderr).not.toContain(
+      '[dry-run] Creating temporary worktree',
+    );
+    expect(existsSync(outputPath)).toBe(false);
+
+    const localBranches = await git.branchLocal();
+    expect(localBranches.all).not.toContain('release/1.0.1');
+    await expect(
+      git.listRemote(['--heads', 'origin', 'refs/heads/release/1.0.1']),
+    ).resolves.toBe(`${releaseSha}\trefs/heads/release/1.0.1\n`);
+  }, 60000);
+
+  test('checks every push URL instead of the fetch URL', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    const currentBranch = (await git.status()).current!;
+    const emptyPushRemoteDir = await createBareRemote();
+    const pushRemoteDir = await createBareRemote();
+
+    await git.push(emptyPushRemoteDir, currentBranch);
+    await git.push(pushRemoteDir, currentBranch);
+    await git.checkoutLocalBranch('release/1.0.1');
+    const releaseSha = (await git.revparse(['HEAD'])).trim();
+    await git.push(pushRemoteDir, 'release/1.0.1');
+    await git.checkout(currentBranch);
+    await git.deleteLocalBranch('release/1.0.1');
+    await git.raw(
+      'config',
+      '--add',
+      'remote.origin.pushurl',
+      emptyPushRemoteDir,
+    );
+    await git.raw('config', '--add', 'remote.origin.pushurl', pushRemoteDir);
+
+    const result = await runCliExpectFailure(tempDir, [
+      'prepare',
+      '1.0.1',
+      '--no-input',
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(result.stdout + result.stderr).toContain(
+      'A release for version 1.0.1 is already pending. Resume and publish it before preparing another release.',
+    );
+    expect((await git.branchLocal()).all).not.toContain('release/1.0.1');
+    await expect(
+      git.listRemote(['--heads', pushRemoteDir, 'refs/heads/release/1.0.1']),
+    ).resolves.toBe(`${releaseSha}\trefs/heads/release/1.0.1\n`);
+  }, 60000);
+
+  test('preserves a release branch created while preparing', async () => {
+    tempDir = await createTestRepo('./create-racing-branch.sh');
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    const currentBranch = (await git.status()).current!;
+    const scriptPath = join(tempDir, 'create-racing-branch.sh');
+    await writeFile(
+      scriptPath,
+      '#!/bin/sh\ngit push origin HEAD:refs/heads/release/1.0.1\necho prepared >> release-prepared\n',
+    );
+    await chmod(scriptPath, '755');
+    await writeFile(join(tempDir, 'release-prepared'), '');
+    await git.add('.');
+    await git.commit('Add racing release script');
+    await git.push('origin', currentBranch);
+    const competingReleaseSha = (await git.revparse(['HEAD'])).trim();
+
+    const result = await runCliExpectFailure(tempDir, [
+      'prepare',
+      '1.0.1',
+      '--no-changelog',
+      '--no-input',
+    ]);
+
+    expect(result.code).toBe(1);
+    await expect(
+      readFile(join(tempDir, 'release-prepared'), 'utf8'),
+    ).resolves.toBe('prepared\n');
+    await expect(
+      git.listRemote(['--heads', 'origin', 'refs/heads/release/1.0.1']),
+    ).resolves.toBe(`${competingReleaseSha}\trefs/heads/release/1.0.1\n`);
+    expect((await git.revparse(['release/1.0.1'])).trim()).not.toBe(
+      competingReleaseSha,
+    );
+  }, 60000);
+
+  test('pushes a new release branch and configures its upstream', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+
+    await execFileAsync(CLI_BIN, ['prepare', '1.0.1', '--no-input'], {
+      cwd: tempDir,
+      env: CLI_ENV,
+    });
+
+    const releaseSha = (await git.revparse(['release/1.0.1'])).trim();
+    await expect(
+      git.listRemote(['--heads', 'origin', 'refs/heads/release/1.0.1']),
+    ).resolves.toBe(`${releaseSha}\trefs/heads/release/1.0.1\n`);
+    await expect(
+      git.raw('config', '--get', 'branch.release/1.0.1.remote'),
+    ).resolves.toBe('origin\n');
+    await expect(
+      git.raw('config', '--get', 'branch.release/1.0.1.merge'),
+    ).resolves.toBe('refs/heads/release/1.0.1\n');
+  }, 60000);
+
+  test('keeps the remote untouched when pushing is disabled', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+
+    const { stdout, stderr } = await execFileAsync(
+      CLI_BIN,
+      ['prepare', '1.0.1', '--no-push', '--no-input'],
+      { cwd: tempDir, env: CLI_ENV },
+    );
+
+    expect(stdout + stderr).toContain(
+      'git push --set-upstream --force-with-lease=refs/heads/release/1.0.1: origin refs/heads/release/1.0.1:refs/heads/release/1.0.1',
+    );
+    expect((await git.branchLocal()).all).toContain('release/1.0.1');
+    await expect(
+      git.listRemote(['--heads', 'origin', 'refs/heads/release/1.0.1']),
+    ).resolves.toBe('');
+  }, 60000);
+
+  test('fails closed when a push destination cannot be inspected', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    const outputPath = join(tempDir, 'github-output');
+    await git.addConfig(
+      'remote.origin.pushurl',
+      join(tempDir, 'missing-remote.git'),
+    );
+
+    const result = await runCliExpectFailure(
+      tempDir,
+      ['prepare', '1.0.1', '--dry-run', '--no-input'],
+      { ...CLI_ENV, GITHUB_OUTPUT: outputPath },
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.stdout + result.stderr).toContain(
+      'Failed to inspect push destinations for remote "origin".',
+    );
+    expect(existsSync(outputPath)).toBe(false);
+    expect((await git.branchLocal()).all).not.toContain('release/1.0.1');
+  }, 60000);
+
+  test('allows a different remote release branch', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    const currentBranch = (await git.status()).current!;
+
+    await git.checkoutLocalBranch('release/1.0.10');
+    await git.push('origin', 'release/1.0.10');
+    await git.checkout(currentBranch);
+    await git.deleteLocalBranch('release/1.0.10');
+
+    const { stdout, stderr } = await execFileAsync(
+      CLI_BIN,
+      ['prepare', '1.0.1', '--dry-run', '--no-input'],
+      { cwd: tempDir, env: CLI_ENV },
+    );
+
+    expect(stdout + stderr).toContain(
+      'Created a new release branch: "release/1.0.1"',
+    );
+  }, 60000);
+
   test('executes pre-release command and shows diff of changes', async () => {
     tempDir = await createTestRepo();
     // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
@@ -277,7 +506,8 @@ describe('prepare --dry-run e2e', () => {
     const versionBumpScript = `#!/bin/bash
 VERSION="$2"
 # Update package.json version
-sed -i 's/"version": "[^"]*"/"version": "'"$VERSION"'"/' package.json
+sed -i.bak 's/"version": "[^"]*"/"version": "'"$VERSION"'"/' package.json
+rm -f package.json.bak
 `;
     const scriptPath = join(scriptsDir, 'bump-version.sh');
     await writeFile(scriptPath, versionBumpScript);
@@ -442,6 +672,48 @@ targets: []
     // Should succeed and detect a minor version bump (due to feat: commit)
     expect(combinedOutput).toContain('Releasing version 1.1.0');
     expect(combinedOutput).toContain('release/1.1.0');
+  }, 60000);
+
+  test('prepares a workspace changelog without changing the root changelog', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    await mkdir(join(tempDir, 'packages', 'cli'), { recursive: true });
+    await writeFile(
+      join(tempDir, '.craft.yml'),
+      `minVersion: "2.29.0"
+github:
+  owner: test-owner
+  repo: test-repo
+preReleaseCommand: ""
+workspaces:
+  packages/cli:
+    changelog:
+      policy: auto
+    versioning:
+      policy: auto
+    targets: []
+`,
+    );
+    await writeFile(
+      join(tempDir, 'packages', 'cli', 'CHANGELOG.md'),
+      '# CLI changelog\n\n## 1.0.0\n\n- Initial release\n',
+    );
+    await git.add('.');
+    await git.commit('chore: Configure CLI workspace');
+    await git.push('origin', (await git.status()).current!);
+
+    const { stdout, stderr } = await execFileAsync(
+      CLI_BIN,
+      ['prepare', '--workspace=packages/cli', '--dry-run', '--no-input'],
+      { cwd: tempDir, env: { ...CLI_ENV, GITHUB_TOKEN: '' } },
+    );
+
+    expect(stdout + stderr).toContain('packages/cli/CHANGELOG.md');
+    expect(stdout + stderr).not.toContain('diff --git a/CHANGELOG.md');
+    expect(await readFile(join(tempDir, 'CHANGELOG.md'), 'utf8')).toContain(
+      '## 1.0.0',
+    );
   }, 60000);
 
   test('auto changelog policy creates CHANGELOG.md if it does not exist', async () => {
