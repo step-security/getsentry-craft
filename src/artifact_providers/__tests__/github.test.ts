@@ -496,9 +496,9 @@ describe('GitHub Artifact Provider', () => {
               node_id: 'MDg6QXJ0aWZhY3Q2MDIzMzcxMA==',
               name: '1b843f2cbb20fdda99ef749e29e75e43e6e43b38',
               size_in_bytes: 6511029,
-              url: 'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710',
+              url: 'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710',
               archive_download_url:
-                'https://api.github.com/repos/getsentry/craft/actions/artifacts/60233710/zip',
+                'https://api.github.com/repos/step-security/getsentry-craft/actions/artifacts/60233710/zip',
               expired: false,
               created_at: '2021-05-12T21:50:35Z',
               updated_at: '2021-05-12T21:50:38Z',
