@@ -1,6 +1,14 @@
 import { describe, test, expect, vi, afterEach, beforeEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'fs';
 import { globSync } from 'glob';
+import { load } from 'js-yaml';
 import { tmpdir } from 'os';
 import { join } from 'path';
 /**
@@ -10,6 +18,7 @@ import { join } from 'path';
 
 import {
   getGitTagPrefix,
+  getChangelogConfig,
   loadConfigurationFromString,
   validateConfiguration,
   setActiveWorkspace,
@@ -21,8 +30,48 @@ import {
 } from '../config';
 import { CraftProjectConfigSchema } from '../schemas/project_config';
 import { logger } from '../logger';
+import { GitHubTarget } from '../targets/github';
+import { NoneArtifactProvider } from '../artifact_providers/none';
+import { BaseTarget } from '../targets/base';
 
 describe('validateConfiguration', () => {
+  test('Craft archives its release files and documentation at versioned GCS paths', async () => {
+    const rawConfig = load(
+      readFileSync(join(__dirname, '../../.craft.yml'), 'utf8'),
+    ) as Record<string, unknown>;
+    const config = validateConfiguration(rawConfig);
+    const gcsConfig = config.targets?.find(target => target.name === 'gcs');
+    if (!gcsConfig) {
+      throw new Error('Craft GCS target is missing');
+    }
+
+    expect(gcsConfig.paths).toContainEqual(
+      expect.objectContaining({ path: '/craft/{{version}}/' }),
+    );
+
+    const filenames = [
+      'craft',
+      'sentry-craft-2.35.0.tgz',
+      'gh-pages.zip',
+      'other.zip',
+      'gh-pages.zip.bak',
+    ];
+    const provider = new NoneArtifactProvider();
+    vi.spyOn(provider, 'listArtifactsForRevision').mockResolvedValue(
+      filenames.map(filename => ({
+        filename,
+        storedFile: { filename, downloadFilepath: filename, size: 1 },
+      })),
+    );
+
+    const gcs = new BaseTarget(gcsConfig, provider);
+    expect(
+      (await gcs.getArtifactsForRevision('release-commit')).map(
+        artifact => artifact.filename,
+      ),
+    ).toEqual(filenames.slice(0, 3));
+  });
+
   test('parses minimal configuration', () => {
     const data = {
       github: { owner: 'step-security', repo: 'getsentry-craft' },
@@ -46,6 +95,7 @@ describe('validateConfiguration', () => {
         filePath: 'CHANGELOG.md',
         policy: 'auto',
         scopeGrouping: true,
+        includePaths: ['apps/cli-docs'],
       },
     };
 
@@ -59,6 +109,153 @@ describe('validateConfiguration', () => {
 
     expect(validateConfiguration(data)).toEqual(data);
   });
+
+  test('normalizes opt-in AI summary settings from the active schema', () => {
+    loadConfigurationFromString('changelog:\n  policy: auto\n  aiSummary: {}');
+    expect(getChangelogConfig().aiSummary).toEqual({
+      llm: {
+        endpoint: 'https://api.githubcopilot.com/responses',
+        model: 'gpt-5.4-nano',
+        apiKeyEnv: 'GITHUB_TOKEN',
+      },
+      minItems: 5,
+      levels: ['release'],
+    });
+  });
+
+  test('normalizes optional AI writing style', () => {
+    loadConfigurationFromString(
+      'changelog:\n  policy: auto\n  aiSummary:\n    style: "  Concise and friendly.  "',
+    );
+    expect(getChangelogConfig().aiSummary).toMatchObject({
+      style: 'Concise and friendly.',
+    });
+  });
+
+  test.each(['', '   ', 'a'.repeat(501), 42])(
+    'rejects invalid AI writing style %j',
+    style => {
+      expect(() =>
+        validateConfiguration({ changelog: { aiSummary: { style } } }),
+      ).toThrow(/changelog/);
+    },
+  );
+
+  test.each([-1, 1.5])('rejects invalid summary threshold %s', minItems => {
+    expect(() =>
+      validateConfiguration({
+        changelog: { aiSummary: { minItems } },
+      }),
+    ).toThrow(/changelog/);
+  });
+
+  test('normalizes empty levels to release-only and accepts a zero threshold', () => {
+    loadConfigurationFromString(
+      'changelog:\n  policy: auto\n  aiSummary:\n    levels: []\n    minItems: 0',
+    );
+    expect(getChangelogConfig().aiSummary).toMatchObject({
+      levels: ['release'],
+      minItems: 0,
+    });
+    expect(getChangelogConfig().aiSummary).not.toHaveProperty('topLevel');
+  });
+
+  test.each([
+    'https://gateway.example/chat',
+    'http://127.0.0.1:1234/chat',
+    'http://[::1]:1234/chat',
+  ])('accepts a configured HTTP endpoint %s and token variable', endpoint => {
+    expect(
+      validateConfiguration({
+        changelog: {
+          aiSummary: {
+            llm: { endpoint, apiKeyEnv: 'TEAM_MODEL_TOKEN' },
+          },
+        },
+      }),
+    ).toMatchObject({
+      changelog: {
+        aiSummary: { llm: { endpoint, apiKeyEnv: 'TEAM_MODEL_TOKEN' } },
+      },
+    });
+  });
+  test.each([
+    'http://external.example/chat',
+    'https://user:pass@example.com/chat',
+    'https://example.com/chat#fragment',
+  ])('rejects unsafe configured endpoint %s', endpoint => {
+    expect(() =>
+      validateConfiguration({
+        changelog: { aiSummary: { llm: { endpoint } } },
+      }),
+    ).toThrow(/changelog/);
+  });
+  test.each(['invalid-name', '', '1TOKEN'])(
+    'rejects invalid token variable %s',
+    apiKeyEnv => {
+      expect(() =>
+        validateConfiguration({
+          changelog: { aiSummary: { llm: { apiKeyEnv } } },
+        }),
+      ).toThrow(/changelog/);
+    },
+  );
+
+  test('rejects an empty summary model', () => {
+    expect(() =>
+      validateConfiguration({
+        changelog: { aiSummary: { llm: { model: '  ' } } },
+      }),
+    ).toThrow(/changelog/);
+  });
+
+  test.each([[['invalid']], [['release', 'release']]])(
+    'rejects invalid summary levels %j',
+    levels => {
+      expect(() =>
+        validateConfiguration({
+          changelog: { aiSummary: { levels } },
+        }),
+      ).toThrow(/changelog/);
+    },
+  );
+
+  test('inherits summary settings and allows a workspace to disable them', () => {
+    const yaml = `minVersion: ${WORKSPACES_MIN_VERSION}\nchangelog:\n  policy: auto\n  aiSummary:\n    minItems: 8\nworkspaces:\n  cli: {}\n  mcp:\n    changelog:\n      policy: auto\n      aiSummary: false`;
+    try {
+      setActiveWorkspace('cli');
+      loadConfigurationFromString(yaml);
+      expect(getChangelogConfig().aiSummary).toMatchObject({ minItems: 8 });
+      setActiveWorkspace('mcp');
+      loadConfigurationFromString(yaml);
+      expect(getChangelogConfig().aiSummary).toBe(false);
+    } finally {
+      setActiveWorkspace(undefined);
+    }
+  });
+
+  test('omitting aiSummary leaves generation disabled; false is an explicit opt-out', () => {
+    loadConfigurationFromString('changelog:\n  policy: auto');
+    expect(getChangelogConfig().aiSummary).toBeUndefined();
+    loadConfigurationFromString(
+      'changelog:\n  policy: auto\n  aiSummary: false',
+    );
+    expect(getChangelogConfig().aiSummary).toBe(false);
+  });
+
+  test.each([
+    { enabled: false },
+    { enabled: true },
+    { kickInThreshold: 5 },
+    { topLevel: true },
+  ])(
+    'rejects obsolete summary configuration %j instead of silently enabling it',
+    aiSummary => {
+      expect(() => validateConfiguration({ changelog: { aiSummary } })).toThrow(
+        /changelog/,
+      );
+    },
+  );
 
   test('parses configuration with versioning', () => {
     const data = {
@@ -89,6 +286,19 @@ describe('validateConfiguration', () => {
   test('fails with invalid changelog policy', () => {
     expect(() =>
       validateConfiguration({ changelog: { policy: 'invalid' } }),
+    ).toThrow(/changelog/);
+  });
+
+  test.each([
+    '../outside',
+    '/absolute',
+    'apps//docs',
+    'apps/../docs',
+    '-option',
+    'apps\\docs',
+  ])('rejects unsafe changelog include path %s', includePath => {
+    expect(() =>
+      validateConfiguration({ changelog: { includePaths: [includePath] } }),
     ).toThrow(/changelog/);
   });
 });
@@ -306,6 +516,7 @@ describe('workspaces', () => {
       rmSync(directory, { recursive: true, force: true });
     }
     setActiveWorkspace(undefined);
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -352,6 +563,97 @@ describe('workspaces', () => {
     expect(config.changelog).toBe('CHANGELOG.md');
     // `workspaces` is stripped from the resolved config.
     expect(config.workspaces).toBeUndefined();
+  });
+
+  test('defaults a directory workspace changelog to its own file', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'craft-workspace-changelog-'));
+    temporaryDirectories.push(directory);
+    mkdirSync(join(directory, 'packages', 'cli'), { recursive: true });
+    writeFileSync(join(directory, 'CHANGELOG.md'), '# Root changelog\n');
+    writeFileSync(
+      join(directory, 'packages', 'cli', 'CHANGELOG.md'),
+      '# CLI changelog\n',
+    );
+    writeFileSync(
+      join(directory, '.craft.yml'),
+      [
+        `minVersion: ${WORKSPACES_MIN_VERSION}`,
+        'workspaces:',
+        '  packages/cli:',
+        '    changelog:',
+        '      policy: auto',
+      ].join('\n'),
+    );
+    process.chdir(directory);
+
+    setActiveWorkspace('packages/cli');
+    expect(getChangelogConfig().filePath).toBe('packages/cli/CHANGELOG.md');
+    vi.stubEnv('GITHUB_TOKEN', 'test-token');
+    const target = new GitHubTarget(
+      { name: 'github' },
+      new NoneArtifactProvider(),
+      { owner: 'test-owner', repo: 'test-repo' },
+    );
+    expect(target.githubConfig.changelog).toBe('packages/cli/CHANGELOG.md');
+  });
+
+  test('uses a workspace changelog path before the file is created', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'craft-workspace-changelog-'));
+    temporaryDirectories.push(directory);
+    mkdirSync(join(directory, 'packages', 'cli'), { recursive: true });
+    writeFileSync(
+      join(directory, '.craft.yml'),
+      `minVersion: ${WORKSPACES_MIN_VERSION}\nworkspaces:\n  packages/cli: {}\n`,
+    );
+    process.chdir(directory);
+
+    setActiveWorkspace('packages/cli');
+    expect(getChangelogConfig().filePath).toBe('packages/cli/CHANGELOG.md');
+  });
+
+  test('preserves an explicitly configured root changelog for a workspace', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'craft-workspace-changelog-'));
+    temporaryDirectories.push(directory);
+    mkdirSync(join(directory, 'packages', 'cli'), { recursive: true });
+    writeFileSync(
+      join(directory, '.craft.yml'),
+      `minVersion: ${WORKSPACES_MIN_VERSION}\nchangelog: CHANGELOG.md\nworkspaces:\n  packages/cli: {}\n`,
+    );
+    process.chdir(directory);
+
+    setActiveWorkspace('packages/cli');
+    expect(getChangelogConfig().filePath).toBe('CHANGELOG.md');
+  });
+
+  test('keeps the root changelog default for a workspace alias', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'craft-workspace-changelog-'));
+    temporaryDirectories.push(directory);
+    writeFileSync(
+      join(directory, '.craft.yml'),
+      `minVersion: ${WORKSPACES_MIN_VERSION}\nworkspaces:\n  cli: {}\n`,
+    );
+    process.chdir(directory);
+
+    setActiveWorkspace('cli');
+    expect(getChangelogConfig().filePath).toBe('CHANGELOG.md');
+  });
+
+  test('rejects a workspace directory redirected outside the repository', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'craft-workspace-changelog-'));
+    const outside = mkdtempSync(join(tmpdir(), 'craft-workspace-outside-'));
+    temporaryDirectories.push(directory, outside);
+    mkdirSync(join(outside, 'cli'));
+    symlinkSync(outside, join(directory, 'packages'), 'dir');
+    writeFileSync(
+      join(directory, '.craft.yml'),
+      `minVersion: ${WORKSPACES_MIN_VERSION}\nworkspaces:\n  packages/cli: {}\n`,
+    );
+    process.chdir(directory);
+
+    setActiveWorkspace('packages/cli');
+    expect(() => getChangelogConfig()).toThrow(
+      'Workspace directory escapes the repository',
+    );
   });
 
   test('a different workspace resolves independently', () => {
