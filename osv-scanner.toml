@@ -29,3 +29,11 @@ reason = "path-to-regexp pulled in by @vercel/client; Vercel target is not used 
 [[IgnoredVulns]]
 id = "GHSA-w5hq-g745-h8pq"
 reason = "uuid pulled in by @google-cloud/storage (GCS target) and @sentry/esbuild-plugin (build tooling); neither is used in the GitHub Action flow"
+
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+reason = "minimatch pulled in by typescript-eslint (dev-only lint tooling); not part of the shipped action"
+
+[[IgnoredVulns]]
+id = "GHSA-mrhx-c7xc-m3w5"
+reason = "zod only validates the repository's own .craft.yml and Craft's own AI responses; no untrusted oversized arrays are parsed"
