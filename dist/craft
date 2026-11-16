@@ -164201,6 +164201,7 @@ var require_ready_state = __commonJS({
     __export2(ready_state_exports, {
       isAliasAssigned: () => isAliasAssigned,
       isAliasError: () => isAliasError,
+      isBlocked: () => isBlocked,
       isDone: () => isDone,
       isFailed: () => isFailed,
       isReady: () => isReady
@@ -164222,7 +164223,11 @@ var require_ready_state = __commonJS({
       }
       return state2.endsWith("_ERROR") || state2 === "ERROR";
     };
-    var isDone = (buildOrDeployment) => isReady(buildOrDeployment) || isFailed(buildOrDeployment);
+    var isBlocked = ({
+      readyState,
+      state: state2
+    }) => readyState === "BLOCKED" || state2 === "BLOCKED";
+    var isDone = (buildOrDeployment) => isReady(buildOrDeployment) || isFailed(buildOrDeployment) || isBlocked(buildOrDeployment);
     var isAliasAssigned = (deployment) => Boolean(deployment.aliasAssigned);
     var isAliasError = (deployment) => Boolean(deployment.aliasError);
   }
@@ -164673,7 +164678,7 @@ var require_package4 = __commonJS({
   "node_modules/@vercel/client/package.json"(exports2, module2) {
     module2.exports = {
       name: "@vercel/client",
-      version: "18.11.2",
+      version: "18.12.1",
       main: "dist/index.js",
       typings: "dist/index.d.ts",
       homepage: "https://vercel.com",
@@ -164710,9 +164715,9 @@ var require_package4 = __commonJS({
         querystring: "^0.2.0",
         "sleep-promise": "8.0.1",
         "tar-fs": "1.16.3",
+        "@vercel/build-utils": "15.4.0",
         "@vercel/error-utils": "2.2.1",
-        "@vercel/routing-utils": "6.6.1",
-        "@vercel/build-utils": "15.3.0"
+        "@vercel/routing-utils": "6.6.1"
       },
       scripts: {
         build: "node ../../utils/build.mjs",
@@ -173363,7 +173368,7 @@ ${codeblock}`, options);
       }
       return null;
     }
-    async function readConfigFile(files) {
+    async function readConfigFile(files, { silent = false } = {}) {
       files = Array.isArray(files) ? files : [files];
       for (let name of files) {
         let data = await readFileOrNull(name);
@@ -173377,7 +173382,7 @@ ${codeblock}`, options);
               return import_js_yaml7.default.safeLoadAll(str2, (doc) => docs.push(doc), { filename: name }), docs.at(-1) ?? null;
             }
           } catch {
-            console.log(`Error while parsing config file: "${name}"`);
+            silent || console.log(`Error while parsing config file: "${name}"`);
           }
         }
       }
@@ -178294,19 +178299,11 @@ ${entrypointsForMessage}`);
       "use strict";
       INTERNAL_SERVICE_PREFIX = "/_svc", SERVICE_NAME_PATTERN = "^[a-z]([a-z_-]*[a-z])?$";
     } });
-    var schedule_path_utils_exports = {};
-    __export2(schedule_path_utils_exports, { SCHEDULE_FUNCTION_PREFIX: () => SCHEDULE_FUNCTION_PREFIX, getScheduleFunctionPath: () => getScheduleFunctionPath });
-    function getScheduleFunctionPath(entrypointSegments) {
-      if (entrypointSegments.length === 0 || entrypointSegments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\"))) throw new Error("Schedule function paths require safe, non-empty segments");
-      return [SCHEDULE_FUNCTION_PREFIX, ...entrypointSegments].join("/");
-    }
-    var SCHEDULE_FUNCTION_PREFIX;
-    var init_schedule_path_utils = __esm2({ "src/schedule-path-utils.ts"() {
-      "use strict";
-      SCHEDULE_FUNCTION_PREFIX = "_vercel/schedules";
-    } });
     var schedules_exports = {};
-    __export2(schedules_exports, { getNamedSchedules: () => getNamedSchedules, toScheduleRecord: () => toScheduleRecord });
+    __export2(schedules_exports, { getNamedSchedules: () => getNamedSchedules, isServiceSchedule: () => isServiceSchedule, toScheduleRecord: () => toScheduleRecord });
+    function isServiceSchedule(schedule2) {
+      return "entrypoint" in schedule2 || "run" in schedule2;
+    }
     function getNamedSchedules(schedules) {
       return Object.entries(schedules ?? {}).map(([name, schedule2]) => ({ name, ...schedule2 }));
     }
@@ -178660,7 +178657,6 @@ ${entrypointsForMessage}`);
     var import_node_entrypoint;
     var load_import_node_entrypoint = () => import_node_entrypoint ??= (init_node_entrypoint(), __toCommonJS2(node_entrypoint_exports));
     __reExport(stdin_exports, (init_service_path_utils(), __toCommonJS2(service_path_utils_exports)), module2.exports);
-    __reExport(stdin_exports, (init_schedule_path_utils(), __toCommonJS2(schedule_path_utils_exports)), module2.exports);
     __reExport(stdin_exports, (init_schedules(), __toCommonJS2(schedules_exports)), module2.exports);
     __reExport(stdin_exports, (init_dockerfile_entrypoint(), __toCommonJS2(dockerfile_entrypoint_exports)), module2.exports);
     var import_daemons;
@@ -187101,6 +187097,7 @@ var require_utils7 = __commonJS({
       "notice",
       "tip",
       "canceled",
+      "blocked",
       // v1 Checks events
       "checks-registered",
       "checks-completed",
@@ -188036,6 +188033,10 @@ var require_check_deployment_status = __commonJS({
             debug5("Deployment state changed to CANCELED");
             finishedEvents.add("canceled");
             yield { type: "canceled", payload: deploymentUpdate };
+          }
+          if ((0, import_ready_state.isBlocked)(deploymentUpdate)) {
+            debug5("Deployment state changed to BLOCKED");
+            return yield { type: "blocked", payload: deploymentUpdate };
           }
           if ((0, import_ready_state.isReady)(deploymentUpdate) && !finishedEvents.has("ready")) {
             debug5("Deployment state changed to READY");
@@ -194096,6 +194097,7 @@ var require_collect_deployment_files = __commonJS({
     var __toCommonJS2 = (mod) => __copyProps2(__defProp2({}, "__esModule", { value: true }), mod);
     var collect_deployment_files_exports = {};
     __export2(collect_deployment_files_exports, {
+      addRootPageAlias: () => addRootPageAlias,
       assertDeploymentPath: () => assertDeploymentPath,
       collectDeploymentFiles: () => collectDeploymentFiles
     });
@@ -194164,7 +194166,32 @@ ${err.message}`;
         }
         throw err;
       }
+      if (clientOptions.servePageAtRoot && !clientOptions.prebuilt && clientOptions.archive !== "tgz" && typeof path17 === "string") {
+        addRootPageAlias(filesMap, isDirectory ? path17 : (0, import_path33.dirname)(path17), debug5);
+      }
       return { fileList, filesMap, workPath, isDirectory, ignoreList, warning: warning3 };
+    }
+    function addRootPageAlias(filesMap, root5, debug5) {
+      let page;
+      for (const file of filesMap.values()) {
+        for (const name of file.names) {
+          const rel = (0, import_path33.relative)(root5, name).split(import_path33.sep).join("/");
+          if (rel === "package.json" || rel === "middleware.js" || rel === "middleware.ts" || rel.startsWith("api/") || rel.startsWith("public/")) {
+            return;
+          }
+          const lower = rel.toLowerCase();
+          if (!lower.endsWith(".html") && !lower.endsWith(".htm"))
+            continue;
+          if (page || rel.includes("/") || rel === "index.html" || rel === "index.htm") {
+            return;
+          }
+          page = { names: file.names, name: rel };
+        }
+      }
+      if (!page)
+        return;
+      debug5(`Also uploading "${page.name}" as "index.html" so / serves it`);
+      page.names.push((0, import_path33.join)(root5, "index.html"));
     }
   }
 });
