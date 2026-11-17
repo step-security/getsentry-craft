@@ -14,7 +14,9 @@ import { load } from 'js-yaml';
 import { afterEach, expect, test } from 'vitest';
 
 interface ActionStep {
+  'continue-on-error'?: boolean | string;
   env?: Record<string, string>;
+  if?: string;
   name?: string;
   run?: string;
 }
