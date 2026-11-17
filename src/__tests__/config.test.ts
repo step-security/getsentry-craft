@@ -339,10 +339,6 @@ describe('validateConfiguration', () => {
 
   test('fails with invalid github config', () => {
     expect(() =>
-<<<<<<< 92c900d9bd06b8ee31168dda5a21bdead5acb650
-      validateConfiguration({ github: { owner: 'step-security' } }),
-    ).toThrow(/repo.*Required/);
-=======
       validateConfiguration({ github: { owner: 'getsentry' } }),
     ).toThrow('github.repo: Invalid key: Expected "repo"');
   });
@@ -364,7 +360,6 @@ describe('validateConfiguration', () => {
     expect(() => validateConfiguration(data)).toThrow(
       `${path}: Invalid type: Expected Object but received Array`,
     );
->>>>>>> c65b1b4efb99dd9095ce242f9c420cb1f4c730ea
   });
 
   test('fails with invalid minVersion format', () => {
