@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { summarizeChangelog, formatSummaryText } from '../ai-summary';
+import {
+  summarizeChangelog,
+  formatSummaryText,
+  summaryDescription,
+} from '../ai-summary';
 import { marked } from 'marked';
 import { setGlobals } from '../helpers';
 import { enableWorktreeMode, disableWorktreeMode } from '../dryRun';
@@ -22,6 +26,7 @@ const config = {
     apiKeyEnv: 'AI_SUMMARY_TOKEN',
   },
   minItems: 5,
+  timeout: 120,
   levels: ['release', 'category', 'scope'] as (
     'release' | 'category' | 'scope'
   )[],
@@ -58,19 +63,44 @@ const categories = [
 function modelResponse(options: SummaryRequest) {
   const input = JSON.parse(options.input);
   return {
-    summaries: input.nodes.map((node: any) => ({
-      id: node.id,
-      summary: `${input.level}: ${node.title} (${node.parts
-        .map((part: any) => part.text)
-        .join('; ')
-        .slice(0, 700)})`,
-      importantChanges: node.parts.flatMap((part: any) => [
-        ...(part.importantChanges || []),
-        ...(part.important
-          ? [{ id: part.sourceId, summary: part.text.slice(0, 500) }]
-          : []),
-      ]),
-    })),
+    summaries: Object.fromEntries(
+      input.nodes
+        .map((node: any) => ({
+          id: node.id,
+          ...(input.level === 'release'
+            ? { coveredPartIds: node.parts.map((part: any) => part.id) }
+            : {}),
+          summary:
+            (input.level === 'scope'
+              ? `${input.level}: ${node.title} (${node.parts
+                  .map((part: any) => part.text)
+                  .join('; ')
+                  .slice(0, 700)}).`
+              : input.level === 'category'
+                ? `Changes to ${node.title}.`
+                : 'Release overview.') +
+            [
+              ...new Set(
+                node.parts.flatMap((part: any) => part.requiredTerms || []),
+              ),
+            ]
+              .map(term => ` ${term}.`)
+              .join(''),
+          importantChanges: [
+            ...new Map(
+              node.parts
+                .flatMap((part: any) => [
+                  ...(part.importantChanges || []),
+                  ...(part.important
+                    ? [{ id: part.sourceId, summary: part.text.slice(0, 500) }]
+                    : []),
+                ])
+                .map((fact: any) => [fact.id, fact]),
+            ).values(),
+          ],
+        }))
+        .map(({ id, ...digest }: any) => [id, digest]),
+    ),
   };
 }
 describe('hierarchical HTTP changelog summaries', () => {
@@ -110,17 +140,913 @@ describe('hierarchical HTTP changelog summaries', () => {
     expect(Object.keys(result!.categories)).toEqual(
       levels.includes('category') ? ['features', 'fixes'] : [],
     );
-    expect(result!.release.map(statement => statement.id)).toEqual(
-      levels.includes('release') ? ['features', 'fixes'] : [],
-    );
+    expect(Boolean(result!.release)).toBe(levels.includes('release'));
   });
+
+  it('synthesizes one release overview from every category digest', async () => {
+    requestMock.mockImplementation(async request => {
+      const input = JSON.parse(request.input);
+      const output = modelResponse(request);
+      if (input.level === 'category')
+        Object.values(output.summaries).forEach((digest: any, i: number) => {
+          digest.summary = `Category digest: ${input.nodes[i].title}.`;
+        });
+      if (input.level === 'release')
+        output.summaries = Object.fromEntries(
+          input.nodes
+            .map((node: any) => ({
+              id: node.id,
+              summary:
+                'New capabilities and reliability improvements across the API.',
+              importantChanges: [],
+              coveredPartIds: node.parts.map((part: any) => part.id),
+            }))
+            .map(({ id, ...digest }: any) => [id, digest]),
+        );
+      return output;
+    });
+    const result = await summarizeChangelog(categories, config);
+    expect(result?.release).toBe(
+      'New capabilities and reliability improvements across the API.',
+    );
+    const releaseRequests = requestMock.mock.calls
+      .map(([request]) => JSON.parse(request.input))
+      .filter(input => input.level === 'release');
+    expect(releaseRequests).toHaveLength(1);
+    expect(releaseRequests[0].nodes).toHaveLength(1);
+    expect(releaseRequests[0].nodes[0].parts).toMatchObject([
+      { id: 'features', title: 'Features', text: 'Category digest: Features.' },
+      { id: 'fixes', title: 'Fixes', text: 'Category digest: Fixes.' },
+    ]);
+  });
+
+  it('renders model prose without appending a paraphrased critical fact', async () => {
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      Object.values(output.summaries).forEach((digest: any) => {
+        digest.summary = 'Resolved dependency vulnerabilities.';
+        digest.importantChanges = [
+          { id: 'g:item:0', summary: 'Security: fix dependency CVE-1234.' },
+        ];
+      });
+      return output;
+    });
+    const result = await summarizeChangelog(
+      [
+        {
+          id: 'fix',
+          title: 'Fixes',
+          groups: [
+            {
+              id: 'g',
+              title: 'Dependencies',
+              scope: 'Deps',
+              items: ['Security: fix dependency CVE-1234.'],
+            },
+          ],
+        },
+      ],
+      { ...config, levels: ['scope'], minItems: 0 },
+    );
+    expect(result?.scopes.g).toBe('Resolved dependency vulnerabilities.');
+  });
+
+  it('rejects a release overview without verified category coverage', async () => {
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      Object.values(output.summaries).forEach((digest: any) => {
+        delete digest.coveredPartIds;
+      });
+      return output;
+    });
+    expect(await summarizeChangelog(categories, config)).toBeNull();
+  });
+
+  it.each(['missing', 'duplicate', 'unknown'])(
+    'rejects %s category coverage in a release synthesis',
+    async mode => {
+      requestMock.mockImplementation(async request => {
+        const input = JSON.parse(request.input);
+        const output = modelResponse(request);
+        if (input.level === 'release') {
+          const digest = Object.values(output.summaries)[0];
+          if (mode === 'missing') digest.coveredPartIds.pop();
+          if (mode === 'duplicate')
+            digest.coveredPartIds[1] = digest.coveredPartIds[0];
+          if (mode === 'unknown') digest.coveredPartIds[0] = 'private-source';
+        }
+        return output;
+      });
+      expect(await summarizeChangelog(categories, config)).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('stage=release; reason=part-coverage'),
+      );
+      expect(JSON.stringify(vi.mocked(logger.warn).mock.calls)).not.toContain(
+        'private-source',
+      );
+    },
+  );
+
+  it('reduces many categories into one bounded overview while checking every child batch', async () => {
+    const input = Array.from({ length: 80 }, (_, i) => ({
+      id: `category-${i}`,
+      title: `Category ${i}`,
+      groups: [{ id: `g${i}`, title: `Group ${i}`, items: [`Change ${i}`] }],
+    }));
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      if (JSON.parse(request.input).level === 'scope')
+        for (const digest of Object.values(output.summaries))
+          digest.summary = 'abcdefghij'.repeat(110) + '.';
+      if (JSON.parse(request.input).level === 'category')
+        Object.values(output.summaries).forEach((digest: any) => {
+          // Large encoded digests still obey the ordinary category word limit.
+          digest.summary = 'categorytheme'.repeat(35) + '.';
+        });
+      return output;
+    });
+    const result = await summarizeChangelog(input, {
+      ...config,
+      minItems: 0,
+      levels: ['release'],
+    });
+    expect(result?.release).toBeTruthy();
+    expect(result?.release.length).toBeLessThanOrEqual(400);
+    expect(result?.categories).toEqual({});
+    expect(result?.scopes).toEqual({});
+    const requests = requestMock.mock.calls.map(([request]) => ({
+      request,
+      input: JSON.parse(request.input),
+    }));
+    const release = requests.filter(({ input }) => input.level === 'release');
+    expect(release.length).toBeGreaterThan(1);
+    const initialParts = release
+      .flatMap(({ input }) => input.nodes.flatMap((node: any) => node.parts))
+      .filter((part: any) => part.id.startsWith('category-'));
+    expect(initialParts.map((part: any) => part.id)).toEqual(
+      input.map(category => category.id),
+    );
+    expect(release.at(-1)!.input.nodes).toHaveLength(1);
+    for (const { request } of requests)
+      expect(Buffer.byteLength(request.input)).toBeLessThanOrEqual(24000);
+    expect(requests.length).toBeLessThanOrEqual(64);
+  });
+
+  it('repairs omitted operational terms even when another required term is present', async () => {
+    let scopeCalls = 0;
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      if (JSON.parse(request.input).level === 'scope' && ++scopeCalls === 1)
+        for (const digest of Object.values(output.summaries))
+          digest.summary =
+            'Set settings.alpha: true for the new version behavior.';
+      return output;
+    });
+    const input = [
+      {
+        id: 'breaking',
+        title: 'Breaking',
+        groups: [
+          {
+            id: 'g',
+            title: 'Prepare',
+            items: ['Breaking change: version discovery changes.'],
+            descriptions: {
+              0: "After upgrading, projects must set settings.alpha: true. Tag-derived projects need to set beta: '' to opt out. Tests must set fixture.mode: true.",
+            },
+          },
+        ],
+      },
+    ];
+    expect(
+      await summarizeChangelog(input, { ...config, minItems: 0 }),
+    ).not.toBeNull();
+    expect(scopeCalls).toBe(2);
+    const request = requestMock.mock.calls[0][0];
+    const node = JSON.parse(request.input).nodes[0];
+    expect(node.parts[0].requiredTerms).toEqual([
+      'settings.alpha: true',
+      "beta: ''",
+    ]);
+    const schema = (request.schema as any).properties.summaries.properties[
+      node.id
+    ].properties.summary;
+    expect(
+      new RegExp(schema.pattern).test('Set settings.alpha: true now.'),
+    ).toBe(true);
+    expect(
+      new RegExp(schema.pattern).test('Set settingsXalpha: true now.'),
+    ).toBe(false);
+    expect(schema.description).toContain("beta: ''");
+    expect(schema.description).not.toContain('fixture.mode');
+  });
+
+  it('retains bounded original migration conditions when a child digest omits them', async () => {
+    const description =
+      "Tag-derived projects must set preReleaseCommand: '' when versions live outside project files.";
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      if (JSON.parse(request.input).level === 'scope')
+        for (const digest of Object.values(output.summaries)) {
+          digest.summary =
+            "Set preReleaseCommand: '' to bypass version discovery.";
+          digest.importantChanges = [
+            {
+              id: 'g:item:0',
+              summary: 'Version discovery now requires a version to update.',
+            },
+          ];
+        }
+      return output;
+    });
+    const input = [
+      {
+        id: 'breaking',
+        title: 'Breaking',
+        groups: [
+          {
+            id: 'g',
+            title: 'Prepare',
+            items: ['Breaking change: prepare fails when no target bumps.'],
+            descriptions: { 0: description },
+          },
+        ],
+      },
+    ];
+    const result = await summarizeChangelog(input, {
+      ...config,
+      levels: ['release'],
+      minItems: 0,
+    });
+    expect(result).not.toBeNull();
+    const categoryRequest = requestMock.mock.calls
+      .map(([request]) => JSON.parse(request.input))
+      .find(input => input.level === 'category');
+    const context = categoryRequest.nodes[0].parts.find(
+      (part: any) => part.id === 'g:item:0:context',
+    );
+    expect(context).toMatchObject({
+      text: expect.stringContaining(description),
+      count: 0,
+      sourceId: 'g:item:0',
+      important: true,
+    });
+    const releaseRequest = requestMock.mock.calls
+      .map(([request]) => JSON.parse(request.input))
+      .find(input => input.level === 'release');
+    expect(releaseRequest.nodes[0].parts[0].count).toBe(1);
+    expect(releaseRequest.nodes[0].parts).toHaveLength(1);
+    expect(JSON.stringify(releaseRequest)).not.toContain('PR description:');
+    expect(result).toMatchObject({ categories: {}, scopes: {} });
+  });
+
+  it('keeps every entry headline prominent beside long supporting descriptions', async () => {
+    const result = await summarizeChangelog(
+      [
+        {
+          id: 'features',
+          title: 'Features',
+          groups: [
+            {
+              id: 'g',
+              title: 'Changelog',
+              scope: 'Changelog',
+              items: [
+                'Add workspace ownership.\nNested details.',
+                'Ground AI explanations.',
+              ],
+              descriptions: { 0: 'Supporting context. '.repeat(50) },
+            },
+          ],
+        },
+      ],
+      { ...config, minItems: 0 },
+    );
+    expect(result).not.toBeNull();
+    const input = JSON.parse(requestMock.mock.calls[0][0].input);
+    expect(input.nodes[0].parts.map((part: any) => part.title)).toEqual([
+      'Add workspace ownership.',
+      'Ground AI explanations.',
+    ]);
+    expect(
+      input.nodes[0].parts.reduce((n: number, part: any) => n + part.count, 0),
+    ).toBe(2);
+  });
+
+  it('retains migration requirements across same-level reduction rounds', async () => {
+    let finalScopeCalls = 0;
+    requestMock.mockImplementation(async request => {
+      const input = JSON.parse(request.input);
+      const output = modelResponse(request);
+      if (
+        input.level === 'scope' &&
+        input.nodes.some((node: any) =>
+          node.parts.every((part: any) => !part.sourceId),
+        ) &&
+        ++finalScopeCalls === 1
+      )
+        for (const digest of Object.values(output.summaries))
+          digest.summary = 'Version discovery requires explicit configuration.';
+      return output;
+    });
+    const result = await summarizeChangelog(
+      [
+        {
+          id: 'breaking',
+          title: 'Breaking',
+          groups: [
+            {
+              id: 'prepare',
+              title: 'Prepare',
+              scope: 'Prepare',
+              items: [
+                "Breaking change: tag-derived projects must set preReleaseCommand: '' to opt out.",
+                ...Array.from(
+                  { length: 30 },
+                  (_, i) => `Change ${i}: ${'Detailed context. '.repeat(100)}`,
+                ),
+              ],
+            },
+          ],
+        },
+      ],
+      { ...config, minItems: 0, levels: ['scope'] },
+    );
+    expect(result?.scopes.prepare).toContain("preReleaseCommand: ''");
+    expect(finalScopeCalls).toBe(2);
+    expect(result?.release).toBe('');
+  });
+
+  it('batches critical category guidance separately from brief ordinary outcomes', async () => {
+    const input = [
+      ...categories.slice(0, 1),
+      {
+        id: 'breaking',
+        title: 'Breaking',
+        groups: [
+          {
+            id: 'g',
+            title: 'Prepare',
+            items: [
+              'Breaking change: version discovery now requires explicit configuration.',
+            ],
+          },
+        ],
+      },
+      ...categories.slice(1),
+    ];
+    expect(
+      await summarizeChangelog(input, { ...config, minItems: 0 }),
+    ).not.toBeNull();
+    const requests = requestMock.mock.calls
+      .map(([request]) => request)
+      .filter(request => JSON.parse(request.input).level === 'category');
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      const nodes = JSON.parse(request.input).nodes;
+      const critical = nodes.map((node: any) =>
+        node.parts.some((part: any) => part.importantChanges?.length),
+      );
+      expect(new Set(critical).size).toBe(1);
+      if (critical[0]) {
+        expect(request.system).toContain(
+          'Display role: Detailed upgrade guidance',
+        );
+        expect(request.system).not.toContain('8-18 words');
+      } else expect(request.system).toContain('8-18 words');
+    }
+  });
+
+  it('keeps explicit upgrade actions in a detailed breaking category', async () => {
+    const prose =
+      'Tag-derived projects must set preReleaseCommand to an empty string when automatic version discovery cannot find a version.';
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      const level = JSON.parse(request.input).level;
+      for (const digest of Object.values(output.summaries))
+        digest.summary =
+          level === 'release'
+            ? 'Version preparation now checks project versions before releasing.'
+            : prose;
+      return output;
+    });
+    const input = [
+      {
+        id: 'breaking',
+        title: 'Breaking',
+        groups: [
+          {
+            id: 'g',
+            title: 'Prepare',
+            scope: 'Prepare',
+            items: [
+              'Breaking change: version preparation requires a version to bump.',
+            ],
+          },
+        ],
+      },
+    ];
+    const result = await summarizeChangelog(input, { ...config, minItems: 0 });
+    expect(result?.categories.breaking).toBe(prose);
+    expect(result?.scopes.g).toBe(prose);
+    expect(requestMock).toHaveBeenCalledTimes(3);
+    const categoryRequest = requestMock.mock.calls[1][0];
+    const node = JSON.parse(categoryRequest.input).nodes[0];
+    expect(
+      (categoryRequest.schema as any).properties.summaries.properties[node.id]
+        .properties.summary.maxLength,
+    ).toBe(900);
+    expect(node.parts[0].importantChanges).toHaveLength(1);
+  });
+
+  it.each(['category', 'release'] as const)(
+    'falls back after one failed repair of copied %s prose',
+    async level => {
+      const scope =
+        'Workspace owners can exclude unrelated paths from their release notes. ' +
+        'Extra source context about package discovery and boundaries. '.repeat(
+          5,
+        );
+      const category =
+        'Teams get clearer release notes while workspace owners gain path controls, alongside concise summaries.';
+      requestMock.mockImplementation(async request => {
+        const output = modelResponse(request);
+        const current = JSON.parse(request.input).level;
+        for (const digest of Object.values(output.summaries))
+          digest.summary =
+            current === 'scope'
+              ? scope
+              : current === 'category'
+                ? level === 'category'
+                  ? 'WORKSPACE owners can exclude unrelated paths from their release notes!'
+                  : category
+                : 'Teams get clearer release notes while workspace owners.';
+        return output;
+      });
+      const input = [
+        {
+          id: 'features',
+          title: 'Features',
+          groups: [
+            {
+              id: 'g',
+              title: 'Changelog',
+              scope: 'Changelog',
+              items: ['Add workspace controls and PR context.'],
+            },
+          ],
+        },
+      ];
+      expect(
+        await summarizeChangelog(input, { ...config, minItems: 0 }),
+      ).toBeNull();
+      expect(
+        requestMock.mock.calls.filter(
+          ([request]) => JSON.parse(request.input).level === level,
+        ),
+      ).toHaveLength(2);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`stage=${level}; reason=response-repetition`),
+      );
+    },
+  );
+
+  it('keeps single-child categories concise with a fixed character budget', async () => {
+    const scope =
+      'Workspaces can include, exclude, or own unowned paths, and first workspace releases inspect configuration history. AI summaries use condensed PR descriptions to explain concrete changes.';
+    const paraphrase =
+      'Workspaces gain include, exclude, and own modes for unowned paths; initial releases inspect configuration history, while AI summaries use PR descriptions for concrete explanations.';
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      const level = JSON.parse(request.input).level;
+      for (const digest of Object.values(output.summaries))
+        digest.summary = level === 'scope' ? scope : paraphrase;
+      return output;
+    });
+    const input = [
+      {
+        id: 'features',
+        title: 'Features',
+        groups: [
+          {
+            id: 'g',
+            title: 'Changelog',
+            scope: 'Changelog',
+            items: ['Add workspace controls and PR context.'],
+          },
+        ],
+      },
+    ];
+    expect(
+      await summarizeChangelog(input, {
+        ...config,
+        minItems: 0,
+        levels: ['category', 'scope'],
+      }),
+    ).toBeNull();
+    const requests = requestMock.mock.calls.filter(
+      ([request]) => JSON.parse(request.input).level === 'category',
+    );
+    expect(requests).toHaveLength(2);
+    for (const [request] of requests) {
+      const node = JSON.parse(request.input).nodes[0];
+      const schema = (request.schema as any).properties.summaries.properties[
+        node.id
+      ];
+      expect(schema.properties.summary.maxLength).toBe(600);
+      expect(node.maxCharacters).toBe(schema.properties.summary.maxLength);
+    }
+  });
+
+  it('allows a complete category sentence when its child digest is already brief', async () => {
+    const category =
+      'Configuration validation moves to Valibot, and the docs HTTP dependency is updated.';
+    expect(category.length).toBeGreaterThan(80);
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      for (const digest of Object.values(output.summaries))
+        digest.summary =
+          JSON.parse(request.input).level === 'scope'
+            ? 'Valibot validation and docs updates.'
+            : category;
+      return output;
+    });
+    const result = await summarizeChangelog(
+      [
+        {
+          id: 'internal',
+          title: 'Internal Changes',
+          groups: [
+            {
+              id: 'config',
+              title: 'Config',
+              scope: 'Config',
+              items: [
+                'Replace Zod with Valibot.',
+                'Update the docs HTTP dependency.',
+              ],
+            },
+          ],
+        },
+      ],
+      { ...config, minItems: 0, levels: ['category'] },
+    );
+    expect(result?.categories.internal).toBe(category);
+    expect(requestMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects verbose release prose even when it fits the character budget', async () => {
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      if (JSON.parse(request.input).level === 'release')
+        for (const digest of Object.values(output.summaries))
+          digest.summary = 'A change. '.repeat(18).trim();
+      return output;
+    });
+    expect(await summarizeChangelog(categories, config)).toBeNull();
+    expect(
+      requestMock.mock.calls.filter(
+        ([request]) => JSON.parse(request.input).level === 'release',
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('rejects verbose ordinary categories even within the character budget', async () => {
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      if (JSON.parse(request.input).level === 'category')
+        for (const digest of Object.values(output.summaries))
+          digest.summary = 'A '.repeat(22) + 'change.';
+      return output;
+    });
+    expect(await summarizeChangelog(categories, config)).toBeNull();
+    expect(
+      requestMock.mock.calls.filter(
+        ([request]) => JSON.parse(request.input).level === 'category',
+      ),
+    ).toHaveLength(2);
+  });
+
+  it.each([
+    'The release improves parsing but also ref',
+    'Verified installation keeps CI and AI-\u00ad?',
+    'Verified installation keeps CI and AI-?',
+  ])('repairs or falls back for an incomplete overview: %s', async prose => {
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      if (JSON.parse(request.input).level === 'release')
+        for (const digest of Object.values(output.summaries))
+          digest.summary = prose;
+      return output;
+    });
+    expect(await summarizeChangelog(categories, config)).toBeNull();
+    expect(
+      requestMock.mock.calls.filter(
+        ([request]) => JSON.parse(request.input).level === 'release',
+      ),
+    ).toHaveLength(2);
+  });
+
+  it.each(['scope', 'category', 'release'] as const)(
+    'rejects unfinished %s prose after one repair, including hidden digests',
+    async level => {
+      const fragment =
+        'Configuration validation now rejects empty arrays and prototype-named workspace keys, while docs use a more';
+      requestMock.mockImplementation(async request => {
+        const output = modelResponse(request);
+        if (JSON.parse(request.input).level === level)
+          for (const digest of Object.values(output.summaries))
+            digest.summary = fragment;
+        return output;
+      });
+      expect(
+        await summarizeChangelog(categories, {
+          ...config,
+          levels: ['release'],
+        }),
+      ).toBeNull();
+      expect(
+        requestMock.mock.calls.filter(
+          ([request]) => JSON.parse(request.input).level === level,
+        ),
+      ).toHaveLength(2);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`stage=${level}; reason=response-prose`),
+      );
+    },
+  );
+
+  it.each(['scope', 'category', 'release'] as const)(
+    'repairs unfinished %s prose without adding a new retry budget',
+    async level => {
+      let attempts = 0;
+      requestMock.mockImplementation(async request => {
+        const output = modelResponse(request);
+        if (JSON.parse(request.input).level === level && ++attempts === 1)
+          for (const digest of Object.values(output.summaries))
+            digest.summary =
+              'Configuration validation improves while docs use a more';
+        return output;
+      });
+      expect(await summarizeChangelog(categories, config)).not.toBeNull();
+      expect(attempts).toBe(2);
+      expect(requestMock).toHaveBeenCalledTimes(4);
+    },
+  );
+
+  it('does not let model-inferred facts disable ordinary category compression', async () => {
+    let categoryCalls = 0;
+    const scope =
+      'AI explanations use condensed PR descriptions to name specific changes and required actions, including migration advice when relevant. Workspace controls also narrow release history to relevant changes.';
+    requestMock.mockImplementation(async request => {
+      const input = JSON.parse(request.input);
+      const output = modelResponse(request);
+      if (input.level === 'scope')
+        for (const node of input.nodes) {
+          output.summaries[node.id].summary = scope;
+          output.summaries[node.id].importantChanges = [
+            {
+              id: node.parts[0].sourceId,
+              summary: 'AI explanations include breaking-change guidance.',
+            },
+          ];
+        }
+      if (input.level === 'category' && ++categoryCalls === 1)
+        for (const digest of Object.values(output.summaries))
+          digest.summary = scope;
+      return output;
+    });
+    const result = await summarizeChangelog(
+      [
+        {
+          id: 'features',
+          title: 'Features',
+          groups: [
+            { id: 'g', title: 'AI', items: ['Improve AI explanations.'] },
+          ],
+        },
+      ],
+      { ...config, minItems: 0 },
+    );
+    expect(result).not.toBeNull();
+    expect(categoryCalls).toBe(2);
+    const request = requestMock.mock.calls.find(
+      ([request]) => JSON.parse(request.input).level === 'category',
+    )![0];
+    const node = JSON.parse(request.input).nodes[0];
+    expect(node.parts[0].importantChanges).toHaveLength(1);
+    expect(request.system).toContain('8-18 words');
+    expect(
+      (request.schema as any).properties.summaries.properties[node.id]
+        .properties.summary.maxLength,
+    ).toBe(600);
+  });
+
+  it('recognizes disclosure fixes as critical source entries', async () => {
+    expect(
+      await summarizeChangelog(
+        [
+          {
+            id: 'fixes',
+            title: 'Bug Fixes',
+            groups: [
+              {
+                id: 'deps',
+                title: 'Deps',
+                items: [
+                  'Mitigate brace recursion and shared-cache disclosure.',
+                ],
+              },
+            ],
+          },
+        ],
+        { ...config, minItems: 0 },
+      ),
+    ).not.toBeNull();
+    const request = requestMock.mock.calls.find(
+      ([request]) => JSON.parse(request.input).level === 'category',
+    )![0];
+    expect(request.system).toContain('Display role: Detailed upgrade guidance');
+    expect(JSON.parse(request.input).nodes[0].criticalGuidance).toBe(true);
+  });
+
+  it('does not squeeze already brief category digests into an incomplete release overview', async () => {
+    expect(await summarizeChangelog(categories, config)).not.toBeNull();
+    const request = requestMock.mock.calls.find(
+      ([request]) => JSON.parse(request.input).level === 'release',
+    )![0];
+    expect(JSON.parse(request.input).nodes[0].maxCharacters).toBe(400);
+    expect(request.system).toContain('never exceeding 35 words');
+  });
+
+  it('repairs copied child wording while preserving all selected levels', async () => {
+    const copied =
+      'Workspace owners can exclude unrelated paths from their release notes';
+    const scope =
+      `${copied}. ` +
+      'Additional workspace history and AI description details. '.repeat(8);
+    let categoryCalls = 0;
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      const level = JSON.parse(request.input).level;
+      for (const digest of Object.values(output.summaries))
+        digest.summary =
+          level === 'scope'
+            ? scope
+            : level === 'category'
+              ? ++categoryCalls === 1
+                ? copied + '.'
+                : 'Workspace releases gain focused history and richer change explanations.'
+              : 'Releases provide clearer, more focused change information.';
+      return output;
+    });
+    const input = [
+      {
+        id: 'features',
+        title: 'Features',
+        groups: [
+          {
+            id: 'g',
+            title: 'Changelog',
+            scope: 'Changelog',
+            items: ['Add workspace controls and PR context.'],
+          },
+        ],
+      },
+    ];
+    const result = await summarizeChangelog(input, { ...config, minItems: 0 });
+    expect(categoryCalls).toBe(2);
+    expect(result).toMatchObject({
+      release: expect.any(String),
+      categories: {
+        features:
+          'Workspace releases gain focused history and richer change explanations.',
+      },
+      scopes: { g: scope.trim() },
+    });
+  });
+
+  it('rejects an overlong overview instead of displaying concatenated category prose', async () => {
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      if (JSON.parse(request.input).level === 'release')
+        Object.values(output.summaries)[0].summary = 'x'.repeat(401);
+      return output;
+    });
+    expect(await summarizeChangelog(categories, config)).toBeNull();
+  });
+
+  it.each([
+    ['scope', 1200],
+    ['category', 600],
+    ['release', 400],
+  ] as const)(
+    'accepts %s prose at its Unicode character limit',
+    async (level, limit) => {
+      const prose = '🚀'.repeat(limit - 2) + 'a.';
+      requestMock.mockImplementation(async request => {
+        const output = modelResponse(request);
+        for (const digest of Object.values(output.summaries))
+          digest.summary =
+            JSON.parse(request.input).level === level
+              ? prose
+              : '🚀'.repeat(
+                  JSON.parse(request.input).level === 'scope' ? 1198 : 598,
+                ) + 'a.';
+        return output;
+      });
+      const result = await summarizeChangelog(categories, {
+        ...config,
+        minItems: 0,
+        levels: [level],
+      });
+      expect(result).not.toBeNull();
+      expect(
+        result!.release || result!.categories.features || result!.scopes.api,
+      ).toBe(prose);
+    },
+  );
+
+  it.each([
+    ['scope', 1200],
+    ['category', 600],
+    ['release', 400],
+  ] as const)(
+    'rejects %s prose exceeding its Unicode character limit',
+    async (level, limit) => {
+      requestMock.mockImplementation(async request => {
+        const output = modelResponse(request);
+        for (const digest of Object.values(output.summaries))
+          digest.summary =
+            '🚀'.repeat(
+              JSON.parse(request.input).level === level
+                ? limit - 1
+                : JSON.parse(request.input).level === 'scope'
+                  ? 1198
+                  : 598,
+            ) + 'a.';
+        return output;
+      });
+      expect(
+        await summarizeChangelog(categories, {
+          ...config,
+          minItems: 0,
+          levels: [level],
+        }),
+      ).toBeNull();
+    },
+  );
+
+  it.each([1200, 1201])(
+    'validates carried Unicode critical facts at %i characters',
+    async length => {
+      requestMock.mockImplementation(async request => {
+        const output = modelResponse(request);
+        Object.values(output.summaries).forEach((digest: any) => {
+          digest.importantChanges.forEach((fact: any) => {
+            fact.summary = '🚀'.repeat(length);
+          });
+        });
+        return output;
+      });
+      const result = await summarizeChangelog(
+        [
+          {
+            id: 'fixes',
+            title: 'Fixes',
+            groups: [
+              { id: 'g', title: 'Dependencies', items: ['Security fix.'] },
+            ],
+          },
+        ],
+        { ...config, minItems: 0 },
+      );
+      if (length === 1201) expect(result).toBeNull();
+      else {
+        expect(result).not.toBeNull();
+        const last = JSON.parse(requestMock.mock.calls.at(-1)![0].input);
+        expect(last.nodes[0].parts[0].importantChanges[0].summary).toBe(
+          '🚀'.repeat(1200),
+        );
+      }
+    },
+  );
 
   it('reuses digests and includes small unscoped groups in every parent', async () => {
     const result = await summarizeChangelog(categories, config);
-    expect(result!.categories.features).toContain('Small feature');
-    expect(result!.release[0].summary).toContain('Small feature');
+    expect(result).not.toBeNull();
     const inputs = requestMock.mock.calls.map(([options]) =>
       JSON.parse(options.input),
+    );
+    expect(
+      inputs.find(input => input.level === 'category').nodes[0].parts,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'small',
+          text: expect.stringContaining('Small feature'),
+        }),
+      ]),
     );
     expect(
       inputs.find(input => input.level === 'category').nodes[0].parts[0].text,
@@ -131,17 +1057,24 @@ describe('hierarchical HTTP changelog summaries', () => {
     expect(
       inputs
         .find(input => input.level === 'release')
-        .nodes.map((node: any) => node.parts[0].count),
+        .nodes[0].parts.map((part: any) => part.count),
     ).toEqual([7, 6]);
   });
 
   it('retains child scope labels when reusing scope digests in a category', async () => {
     requestMock.mockImplementation(async request => ({
-      summaries: JSON.parse(request.input).nodes.map((node: any) => ({
-        id: node.id,
-        summary: 'Added commands.',
-        importantChanges: [],
-      })),
+      summaries: Object.fromEntries(
+        JSON.parse(request.input)
+          .nodes.map((node: any) => ({
+            id: node.id,
+            ...(JSON.parse(request.input).level === 'release'
+              ? { coveredPartIds: node.parts.map((part: any) => part.id) }
+              : {}),
+            summary: 'Added commands.',
+            importantChanges: [],
+          }))
+          .map(({ id, ...digest }: any) => [id, digest]),
+      ),
     }));
     expect(await summarizeChangelog(categories, config)).not.toBeNull();
     const categoryRequest = requestMock.mock.calls
@@ -155,7 +1088,8 @@ describe('hierarchical HTTP changelog summaries', () => {
 
   it('applies writing style at every level while retaining the base constraints', async () => {
     await summarizeChangelog(categories, config);
-    const base = requestMock.mock.calls[0][0].system;
+    const base =
+      requestMock.mock.calls[0][0].system.split('\nDisplay role:')[0];
     requestMock.mockClear();
     const style = 'Concise and friendly for developers.';
     expect(
@@ -166,6 +1100,111 @@ describe('hierarchical HTTP changelog summaries', () => {
       expect(request.system).toContain(JSON.stringify(style));
       expect(request.system).toContain('requirements above still apply');
     }
+  });
+
+  it('constrains generated digest IDs and counts to the requested nodes at every level', async () => {
+    expect(await summarizeChangelog(categories, config)).not.toBeNull();
+    for (const [request] of requestMock.mock.calls) {
+      const nodes = JSON.parse(request.input).nodes;
+      const entries = (request.schema as any).properties.summaries;
+      expect(entries.type).toBe('object');
+      expect(entries.additionalProperties).toBe(false);
+      expect(entries.required).toEqual(nodes.map((node: any) => node.id));
+      expect(Object.keys(entries.properties)).toEqual(
+        nodes.map((node: any) => node.id),
+      );
+      for (const part of nodes.flatMap((node: any) => node.parts))
+        expect(Object.keys(entries.properties)).not.toContain(part.id);
+    }
+  });
+
+  it('constrains critical fact IDs and minimum coverage separately for each node', async () => {
+    const input = [
+      {
+        id: 'critical',
+        title: 'Critical',
+        groups: [
+          {
+            id: 'fix',
+            title: 'Fix',
+            items: ['Breaking change: remove legacy API.'],
+          },
+        ],
+      },
+    ];
+    expect(
+      await summarizeChangelog(input, { ...config, minItems: 0 }),
+    ).not.toBeNull();
+    for (const [request] of requestMock.mock.calls) {
+      const nodes = JSON.parse(request.input).nodes;
+      const branches = Object.values(
+        (request.schema as any).properties.summaries.properties,
+      ) as any[];
+      expect(Array.isArray(branches)).toBe(true);
+      for (const [index, node] of nodes.entries()) {
+        const allowed = [
+          ...new Set(
+            node.parts.flatMap((part: any) => [
+              ...(part.sourceId ? [part.sourceId] : []),
+              ...(part.importantChanges || []).map((fact: any) => fact.id),
+            ]),
+          ),
+        ];
+        const required = new Set(
+          node.parts.flatMap((part: any) => [
+            ...(part.important && part.sourceId ? [part.sourceId] : []),
+            ...(part.importantChanges || []).map((fact: any) => fact.id),
+          ]),
+        );
+        const facts = branches[index].properties.importantChanges;
+        expect(facts.minItems).toBe(required.size);
+        expect(facts.maxItems).toBe(Math.min(100, allowed.length));
+        expect(facts.items.properties.id.enum).toEqual(allowed);
+      }
+    }
+  });
+
+  it('does not emit an empty fact-ID enum for parents without critical facts', async () => {
+    expect(await summarizeChangelog(categories, config)).not.toBeNull();
+    const parents = requestMock.mock.calls.filter(
+      ([request]) => JSON.parse(request.input).level !== 'scope',
+    );
+    expect(parents.length).toBeGreaterThan(0);
+    for (const [request] of parents) {
+      const branches = Object.values(
+        (request.schema as any).properties.summaries.properties,
+      ) as any[];
+      for (const branch of branches) {
+        const facts = branch.properties.importantChanges;
+        expect(facts.minItems).toBe(0);
+        expect(facts.maxItems).toBe(0);
+        expect(facts.items.properties.id).toEqual({ type: 'string' });
+      }
+    }
+  });
+
+  it('preserves fallback without making a request when required facts exceed the response limit', async () => {
+    const result = await summarizeChangelog(
+      [
+        {
+          id: 'critical',
+          title: 'Critical',
+          groups: [
+            {
+              id: 'fix',
+              title: 'Fix',
+              items: Array.from({ length: 101 }, (_, i) => `Security fix ${i}`),
+            },
+          ],
+        },
+      ],
+      { ...config, minItems: 0 },
+    );
+    expect(result).toBeNull();
+    expect(requestMock).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('stage=scope; reason=input-budget'),
+    );
   });
 
   it('keeps strict structured-output and input bounds', async () => {
@@ -199,7 +1238,7 @@ describe('hierarchical HTTP changelog summaries', () => {
       ],
       { ...config, minItems: 0 },
     );
-    expect(result!.release).toHaveLength(1);
+    expect(result!.release).toBeTruthy();
     const atoms = requestMock.mock.calls
       .flatMap(([options]) => JSON.parse(options.input).nodes)
       .flatMap(node => node.parts)
@@ -222,7 +1261,7 @@ describe('hierarchical HTTP changelog summaries', () => {
       config,
     );
     expect(Object.keys(result!.scopes)).toHaveLength(30);
-    expect(result!.release.map(s => s.id)).toEqual(['large']);
+    expect(result!.release).toBeTruthy();
   });
 
   it('carries source-linked security and breaking facts through reductions', async () => {
@@ -245,7 +1284,7 @@ describe('hierarchical HTTP changelog summaries', () => {
       ],
       { ...config, minItems: 1 },
     );
-    expect(result!.release[0].summary).toContain('CVE-1234');
+    expect(result!.release).toBeTruthy();
     const input = JSON.parse(requestMock.mock.calls.at(-1)![0].input);
     expect(
       input.nodes[0].parts[0].importantChanges.map((fact: any) => fact.id),
@@ -274,10 +1313,10 @@ describe('hierarchical HTTP changelog summaries', () => {
     expect(requestMock).not.toHaveBeenCalled();
   });
 
-  it('renders carried critical facts even when the final prose omits them', async () => {
+  it('carries critical facts internally without appending them to visible prose', async () => {
     requestMock.mockImplementation(async options => {
       const output = modelResponse(options!);
-      output.summaries.forEach((digest: any) => {
+      Object.values(output.summaries).forEach((digest: any) => {
         digest.summary = 'General maintenance.';
       });
       return output;
@@ -292,13 +1331,17 @@ describe('hierarchical HTTP changelog summaries', () => {
       ],
       { ...config, minItems: 0 },
     );
-    expect(result!.release[0].summary).toContain('CVE-1234');
+    expect(result!.release).toBe('General maintenance.');
+    const last = JSON.parse(requestMock.mock.calls.at(-1)![0].input);
+    expect(last.nodes[0].parts[0].importantChanges).toEqual([
+      { id: 'g:item:0', summary: 'SECURITY: fix CVE-1234' },
+    ]);
   });
 
   it('preserves different critical facts in separate fragments of one oversized entry', async () => {
     requestMock.mockImplementation(async options => {
       const output = modelResponse(options!);
-      output.summaries.forEach((digest: any) => {
+      Object.values(output.summaries).forEach((digest: any) => {
         digest.summary = 'General maintenance.';
         digest.importantChanges = [
           ...new Map(
@@ -319,8 +1362,73 @@ describe('hierarchical HTTP changelog summaries', () => {
       ],
       { ...config, minItems: 0 },
     );
-    expect(result!.release[0].summary).toContain('CVE-A');
-    expect(result!.release[0].summary).toContain('API-B');
+    expect(result!.release).toBe('General maintenance.');
+    const last = JSON.parse(requestMock.mock.calls.at(-1)![0].input);
+    const facts = JSON.stringify(last.nodes[0].parts[0].importantChanges);
+    expect(facts).toContain('CVE-A');
+    expect(facts).toContain('API-B');
+  });
+
+  it.each(['scope', 'category', 'release'] as const)(
+    'rejects a late final %s response before an overdue timer callback runs',
+    async level => {
+      vi.useFakeTimers();
+      requestMock.mockImplementation(async request => {
+        const output = modelResponse(request);
+        if (JSON.parse(request.input).level === level)
+          vi.setSystemTime(Date.now() + 30001);
+        return output;
+      });
+      expect(
+        await summarizeChangelog(
+          [
+            {
+              id: 'fixes',
+              title: 'Fixes',
+              groups: [
+                {
+                  id: 'g',
+                  title: 'Dependencies',
+                  scope: 'Deps',
+                  items: ['Dependency update.'],
+                },
+              ],
+            },
+          ],
+          { ...config, minItems: 0, levels: [level] },
+        ),
+      ).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`stage=${level}; reason=request-timeout`),
+      );
+    },
+  );
+
+  it('rejects a response past the total deadline without making another model call', async () => {
+    vi.useFakeTimers();
+    requestMock.mockImplementation(async request => {
+      const output = modelResponse(request);
+      vi.setSystemTime(Date.now() + 120001);
+      return output;
+    });
+    expect(
+      await summarizeChangelog(
+        [
+          {
+            id: 'fixes',
+            title: 'Fixes',
+            groups: [
+              { id: 'g', title: 'Dependencies', items: ['Dependency update.'] },
+            ],
+          },
+        ],
+        { ...config, minItems: 0 },
+      ),
+    ).toBeNull();
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('stage=scope; reason=deadline'),
+    );
   });
 
   it('enforces the total deadline across individually successful requests', async () => {
@@ -352,14 +1460,152 @@ describe('hierarchical HTTP changelog summaries', () => {
     expect(requestMock.mock.calls.at(-1)![0]!.signal!.aborted).toBe(true);
   });
 
+  it.each([600, 0])(
+    'uses the configured total timeout %s for long-running changelogs',
+    async timeout => {
+      vi.useFakeTimers();
+      requestMock.mockImplementation(
+        async options =>
+          new Promise((resolve, reject) => {
+            const timer = setTimeout(
+              () => resolve(modelResponse(options)),
+              25000,
+            );
+            options!.signal!.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(new Error('aborted'));
+            });
+          }),
+      );
+      const groups = Array.from({ length: 50 }, (_, i) => ({
+        id: `g${i}`,
+        title: 'G',
+        items: ['entry'],
+      }));
+      // Five sequential waves of 25-second calls outlast the default 120 seconds.
+      const pending = summarizeChangelog([{ id: 'a', title: 'A', groups }], {
+        ...config,
+        minItems: 0,
+        timeout,
+      });
+      await vi.advanceTimersByTimeAsync(200000);
+      expect((await pending)?.release).toBeTruthy();
+      expect(logger.warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['scope', 'release'] as const)(
+    'rejects array-shaped %s summary maps without coercing them to objects',
+    async level => {
+      requestMock.mockImplementation(async request =>
+        JSON.parse(request.input).level === level
+          ? { summaries: [] }
+          : modelResponse(request),
+      );
+      expect(await summarizeChangelog(categories, config)).toBeNull();
+      expect(
+        requestMock.mock.calls.filter(
+          ([request]) => JSON.parse(request.input).level === level,
+        ),
+      ).toHaveLength(2);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`stage=${level}; reason=response-schema`),
+      );
+    },
+  );
+
   it.each([
     null,
     {},
-    { summaries: [] },
-    { summaries: [{ id: 'unknown', summary: 'text', importantChanges: [] }] },
+    {
+      summaries: {},
+    },
+    {
+      summaries: Object.fromEntries(
+        [{ id: 'unknown', summary: 'text', importantChanges: [] }].map(
+          ({ id, ...digest }: any) => [id, digest],
+        ),
+      ),
+    },
   ])('rejects incomplete structured responses (%j)', async payload => {
     requestMock.mockResolvedValue(payload);
     expect(await summarizeChangelog(categories, config)).toBeNull();
+  });
+
+  it.each([
+    'response-schema',
+    'response-length',
+    'response-words',
+    'response-prose',
+    'response-repetition',
+    'response-json',
+    'important-missing',
+    'important-duplicate',
+  ] as const)(
+    'repairs %s once using the same source and schema',
+    async reason => {
+      const { SummaryFailure } = await import('../ai-summary-error');
+      requestMock.mockRejectedValueOnce(new SummaryFailure(reason));
+      expect(await summarizeChangelog(categories, config)).not.toBeNull();
+      const [first, repaired] = requestMock.mock.calls.map(
+        ([request]) => request,
+      );
+      expect(repaired.input).toBe(first.input);
+      expect(repaired.schema).toEqual(first.schema);
+      expect(repaired.system).toContain('previous response failed validation');
+      expect(repaired.signal).not.toBe(first.signal);
+    },
+  );
+
+  it('stops after one failed repair and preserves original-output fallback', async () => {
+    requestMock.mockResolvedValue({ summaries: {} });
+    expect(await summarizeChangelog(categories, config)).toBeNull();
+    expect(requestMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('counts structured-output repairs against the global request budget', async () => {
+    requestMock.mockImplementation(async request => {
+      if (!request.system.includes('previous response failed validation'))
+        return {};
+      const output = modelResponse(request);
+      for (const digest of Object.values(output.summaries))
+        digest.summary = 'Updated commands.';
+      return output;
+    });
+    const groups = Array.from({ length: 248 }, (_, i) => ({
+      id: `g${i}`,
+      title: 'G',
+      items: ['entry'],
+    }));
+    expect(
+      await summarizeChangelog([{ id: 'a', title: 'A', groups }], {
+        ...config,
+        minItems: 0,
+      }),
+    ).toBeNull();
+    expect(requestMock).toHaveBeenCalledTimes(64);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('reason=request-budget'),
+    );
+  });
+
+  it('does not extend the overall deadline when repairing output', async () => {
+    vi.useFakeTimers();
+    const { SummaryFailure } = await import('../ai-summary-error');
+    requestMock
+      .mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + 119999);
+        throw new SummaryFailure('response-schema');
+      })
+      .mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + 2);
+        return {};
+      });
+    expect(await summarizeChangelog(categories, config)).toBeNull();
+    expect(requestMock).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('reason=deadline'),
+    );
   });
 
   it('uses release-only defaults, treats empty levels as release, and supports threshold zero', async () => {
@@ -377,17 +1623,21 @@ describe('hierarchical HTTP changelog summaries', () => {
         minItems: 0,
         levels: [],
       }),
-    ).toMatchObject({ release: [{ id: 'a' }], categories: {}, scopes: {} });
+    ).toMatchObject({
+      release: expect.any(String),
+      categories: {},
+      scopes: {},
+    });
     expect(
       await summarizeChangelog(small, { ...config, minItems: 0 }),
     ).toMatchObject({
-      release: [{ id: 'a' }],
+      release: expect.any(String),
       categories: { a: expect.any(String) },
       scopes: { g: expect.any(String) },
     });
     expect(
       await summarizeChangelog(categories, { ...config, levels: ['category'] }),
-    ).toMatchObject({ release: [] });
+    ).toMatchObject({ release: '' });
     expect(await summarizeChangelog([], { ...config, minItems: 0 })).toBeNull();
   });
 
@@ -417,7 +1667,7 @@ describe('hierarchical HTTP changelog summaries', () => {
     expect(result).toMatchObject({
       categories: { a: expect.any(String) },
       scopes: {},
-      release: [{ id: 'a' }],
+      release: expect.any(String),
     });
   });
 
@@ -441,17 +1691,28 @@ describe('hierarchical HTTP changelog summaries', () => {
   ])('rejects %s output atomically', async mode => {
     requestMock.mockImplementation(async options => {
       const output = modelResponse(options!);
-      if (mode === 'missing') output.summaries.pop();
-      if (mode === 'duplicate') output.summaries.push(output.summaries[0]);
-      if (mode === 'unknown') output.summaries[0].id = 'invented';
+      if (mode === 'missing')
+        delete output.summaries[Object.keys(output.summaries)[0]];
+      if (mode === 'duplicate')
+        return {
+          summaries: [
+            Object.values(output.summaries)[0],
+            Object.values(output.summaries)[0],
+          ],
+        };
+      if (mode === 'unknown') {
+        output.summaries.invented = Object.values(output.summaries)[0];
+        delete output.summaries[Object.keys(output.summaries)[0]];
+      }
       if (mode === 'missing-critical')
-        output.summaries[0].importantChanges = [];
+        Object.values(output.summaries)[0].importantChanges = [];
       if (mode === 'unlinked-critical')
-        output.summaries[0].importantChanges = [
+        Object.values(output.summaries)[0].importantChanges = [
           { id: 'invented', summary: 'invention' },
         ];
       if (mode === 'negative-claim')
-        output.summaries[0].summary = 'No security fixes are included.';
+        Object.values(output.summaries)[0].summary =
+          'No security fixes are included.';
       return output;
     });
     expect(
@@ -475,7 +1736,7 @@ describe('hierarchical HTTP changelog summaries', () => {
         new Error(`Provider failure ${status}: private-token`),
       );
       expect(await summarizeChangelog(categories, config)).toBeNull();
-      expect(requestMock.mock.calls.length).toBeLessThanOrEqual(3);
+      expect(requestMock).toHaveBeenCalledTimes(1);
       expect(JSON.stringify(vi.mocked(logger.warn).mock.calls)).not.toContain(
         'private-token',
       );
@@ -519,16 +1780,20 @@ describe('hierarchical HTTP changelog summaries', () => {
       requestMock.mockImplementation(async options => {
         const input = JSON.parse(options.input);
         return {
-          summaries: input.nodes.map((node: any) => ({
-            id: node.id,
-            summary: 'General maintenance.',
-            importantChanges: node.parts
-              .filter((part: any) => part.important)
-              .map((part: any) => ({
-                id: part.sourceId,
-                summary: claim,
-              })),
-          })),
+          summaries: Object.fromEntries(
+            input.nodes
+              .map((node: any) => ({
+                id: node.id,
+                summary: 'General maintenance.',
+                importantChanges: node.parts
+                  .filter((part: any) => part.important)
+                  .map((part: any) => ({
+                    id: part.sourceId,
+                    summary: claim,
+                  })),
+              }))
+              .map(({ id, ...digest }: any) => [id, digest]),
+          ),
         };
       });
       const result = await summarizeChangelog(
@@ -548,7 +1813,7 @@ describe('hierarchical HTTP changelog summaries', () => {
         ],
         { ...config, levels: ['scope'], minItems: 0 },
       );
-      expect(requestMock).toHaveBeenCalledTimes(1);
+      expect(requestMock).toHaveBeenCalledTimes(2);
       expect(result).toBeNull();
     },
   );
@@ -599,7 +1864,7 @@ describe('hierarchical HTTP changelog summaries', () => {
       levels: ['release'],
       minItems: 0,
     });
-    expect(result!.release.map(statement => statement.id)).toEqual(['a']);
+    expect(result!.release).toBeTruthy();
     expect(peak).toBeGreaterThan(1);
     expect(peak).toBeLessThanOrEqual(3);
   });
@@ -643,4 +1908,68 @@ it.each([
 ])('generated prose stays inert when rendered: %s', text => {
   const html = marked.parse(formatSummaryText(text));
   expect(html).not.toContain('<a ');
+});
+
+it('condenses PR descriptions into bounded summary context', () => {
+  expect(summaryDescription(undefined)).toBeUndefined();
+  expect(summaryDescription('<!-- template only -->\n\n')).toBeUndefined();
+  expect(
+    summaryDescription(
+      [
+        '<!-- Describe your PR -->',
+        '## Summary :rocket:',
+        'Removes the  `foo` option 🚀 from [the config](https://example.com) <b>now</b>.',
+        '',
+        '```yaml',
+        'foo: true',
+        '```',
+        '- Use **bar**  ',
+        'instead 👍🏽',
+        '  - nested',
+        '',
+        '| Old | New |',
+        '| --- | --- |',
+        '| foo | bar |',
+        '',
+        '![screenshot](https://example.com/a.png)',
+        '<details><summary>Logs</summary>noise</details>',
+      ].join('\n'),
+    ),
+  ).toBe(
+    'Summary Removes the foo option from the config now. Use bar instead nested Old New foo bar',
+  );
+  expect(
+    summaryDescription(
+      'Breaking: `:memory:` is now required for isolated database tests :tada:',
+    ),
+  ).toBe('Breaking: :memory: is now required for isolated database tests');
+  const long = summaryDescription('é'.repeat(1400))!;
+  expect(Array.from(long)).toHaveLength(1200);
+  expect(long.endsWith('…')).toBe(true);
+});
+
+it('retains migration instructions after a long introductory paragraph', () => {
+  const context = summaryDescription(
+    'Background about version detection. '.repeat(40) +
+      '\n\n**Breaking: prepare now fails if no target bumps a version.** ' +
+      "Tag-derived versions must set `preReleaseCommand: ''` to opt out.",
+  )!;
+  expect(context).toContain('prepare now fails');
+  expect(context).toContain("preReleaseCommand: ''");
+  expect(Array.from(context).length).toBeLessThanOrEqual(1200);
+});
+
+it('keeps migration sections together when prioritizing bounded context', () => {
+  const context = summaryDescription(
+    'Background. '.repeat(150) +
+      '\n\n## Migration\n\nSet `preReleaseCommand` to an empty string for tag-derived versions.\n\n## Tests\n\n' +
+      'Details. '.repeat(150),
+  )!;
+  expect(context).toContain(
+    'Migration Set preReleaseCommand to an empty string for tag-derived versions.',
+  );
+  expect(context.indexOf('Migration')).toBeLessThan(
+    context.indexOf('Background'),
+  );
+  expect(Array.from(context).length).toBeLessThanOrEqual(1200);
 });

@@ -1,11 +1,13 @@
 name: 'Craft Prepare Release'
+author: step-security
 description: 'Prepare a new release using Craft'
 
 inputs:
   version:
     description: >
       Version to release. Can be a semver string (e.g., "1.2.3"),
-      a bump type ("major", "minor", "patch"), or "auto" for automatic detection.
+      a bump type ("major", "minor", "patch"), "auto" for automatic detection,
+      or "pre" for the next prerelease.
     required: false
   merge_target:
     description: Target branch to merge into. Uses the default branch as a fallback.
@@ -158,9 +160,17 @@ runs:
         FORCE_INPUT: ${{ inputs.force }}
         BLOCKER_LABEL_INPUT: ${{ inputs.blocker_label }}
       run: |
-        if [[ "$FORCE_INPUT" != 'true' ]] && gh issue list -l "$BLOCKER_LABEL_INPUT" -s open | grep -q '^[0-9]\+[[:space:]]'; then
+        if [[ "$FORCE_INPUT" == 'true' ]]; then
+          exit 0
+        fi
+        # Fail closed: if the lookup fails, `set -e` stops the release.
+        blocker_count=$(gh issue list -R "$GITHUB_REPOSITORY" -l "$BLOCKER_LABEL_INPUT" -s open --json number --jq length)
+        if [[ "$blocker_count" != '0' ]]; then
           echo "::error::Open release-blocking issues found (label: $BLOCKER_LABEL_INPUT), cancelling release..."
-          gh api -X POST repos/:owner/:repo/actions/runs/$GITHUB_RUN_ID/cancel
+          # Run cancellation is asynchronous and does not stop the remaining
+          # steps of this composite action in time, so fail the step as well.
+          gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/cancel" || true
+          exit 1
         fi
 
     - name: Set git user
@@ -225,14 +235,23 @@ runs:
       working-directory: ${{ inputs.path }}
       env:
         CRAFT_LOG_LEVEL: Warn
+        PREPARED_TARGETS: ${{ steps.craft.outputs.targets }}
         WORKSPACE: ${{ inputs.workspace }}
       run: |
         unset CRAFT_WORKSPACE
-        CRAFT_ARGS=()
-        if [[ -n "$WORKSPACE" ]]; then
-          CRAFT_ARGS=("--workspace=$WORKSPACE")
+        # `craft prepare` lists the targets from the release branch before it
+        # switches back to the default branch. Craft versions that don't emit
+        # them fall back to listing the targets of the current checkout.
+        if [[ -n "$PREPARED_TARGETS" ]]; then
+          targets_json="$PREPARED_TARGETS"
+        else
+          CRAFT_ARGS=()
+          if [[ -n "$WORKSPACE" ]]; then
+            CRAFT_ARGS=("--workspace=$WORKSPACE")
+          fi
+          targets_json=$(craft targets "${CRAFT_ARGS[@]}")
         fi
-        targets=$(craft targets "${CRAFT_ARGS[@]}" | jq -r '.[]|" - [ ] \(.)"')
+        targets=$(jq -r '.[]|" - [ ] \(.)"' <<< "$targets_json")
 
         # https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#multiline-strings
         echo "targets<<EOF" >> "$GITHUB_OUTPUT"

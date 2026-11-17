@@ -12,15 +12,15 @@ import {
   getGlobalGitHubConfig,
   getChangelogConfig,
 } from '../config';
-import { getChangesSince } from './git';
+import { getChangesSince, getWorkspaceChangeFilter } from './git';
 import { getGitHubClient } from './githubApi';
 import { getVersion } from './version';
 import type { AiSummaryConfig } from '../schemas/project_config';
 import {
   summarizeChangelog,
   isImportantChangelogText,
+  summaryDescription,
   formatSummaryText,
-  formatSummaryWithDetails,
   type SummaryCategory,
 } from './ai-summary';
 
@@ -30,6 +30,8 @@ export interface CurrentPRInfo {
   title: string;
   body: string;
   author: string;
+  /** Whether the PR author is a bot account */
+  authorIsBot?: boolean;
   labels: string[];
   /** Base branch ref (e.g., "master") for computing merge base */
   baseRef: string;
@@ -65,10 +67,118 @@ async function fetchPRInfo(prNumber: number): Promise<CurrentPRInfo> {
     title: pr.title,
     body: pr.body ?? '',
     author: pr.user?.login ?? '',
+    authorIsBot: pr.user?.type === 'Bot',
     labels: labels.map(l => l.name),
     baseRef: pr.base.ref,
     headSha: pr.head.sha,
   };
+}
+
+/**
+ * Lists the files a PR changes, including the previous path of renamed files,
+ * so a move between workspaces counts for both sides.
+ */
+async function fetchPRFiles(prNumber: number): Promise<string[]> {
+  const { repo, owner } = await getGlobalGitHubConfig();
+  const github = getGitHubClient();
+  const perPage = 100;
+  const files: string[] = [];
+  for (let page = 1; ; page++) {
+    const { data } = await github.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: perPage,
+      page,
+    });
+    for (const file of data) {
+      files.push(file.filename);
+      if (file.previous_filename) {
+        files.push(file.previous_filename);
+      }
+    }
+    if (data.length < perPage) {
+      return files;
+    }
+  }
+}
+
+interface CommitAuthors {
+  nodes: Array<{ user: { login: string } | null }>;
+}
+
+/** PRs keyed by `P<number>` aliases, `null` for numbers that are not PRs */
+interface PRCommitAuthorsResult {
+  repository?: Record<
+    string,
+    { commits: { nodes: Array<{ commit: { authors: CommitAuthors } }> } } | null
+  >;
+}
+
+/** Returns the GitHub logins of commit authors that GitHub matched to a user. */
+function authorLogins(nodes: CommitAuthors['nodes'] = []): string[] {
+  return nodes
+    .map(node => node.user?.login)
+    .filter((login): login is string => Boolean(login));
+}
+
+/**
+ * Fetches the GitHub logins of everyone who authored or co-authored a commit
+ * in the given PRs. Co-authors come from `Co-authored-by` commit trailers.
+ *
+ * Co-authors only add credit, so PRs that fail to load are left out.
+ *
+ * @param prNumbers The PR numbers to fetch
+ * @returns Logins per PR number in commit order, possibly with duplicates
+ */
+async function fetchPRCoAuthors(
+  prNumbers: string[],
+): Promise<Record<string, string[]>> {
+  const { repo, owner } = await getGlobalGitHubConfig();
+  const coAuthors: Record<string, string[]> = {};
+  for (let start = 0; start < prNumbers.length; start += MAX_PRS_PER_QUERY) {
+    const subset = prNumbers.slice(start, start + MAX_PRS_PER_QUERY);
+    const prsQuery = subset
+      // Aliases cannot start with a number, so prefix them with `P`
+      .map(
+        number => `P${number}: pullRequest(number: ${Number(number)}) {
+            commits(first: ${MAX_PR_COMMITS}) {
+              nodes {
+                commit {
+                  authors(first: ${MAX_COMMIT_AUTHORS}) { nodes { user { login } } }
+                }
+              }
+            }
+          }`,
+      )
+      .join('\n');
+    let response: PRCommitAuthorsResult | undefined;
+    try {
+      response = (await getGitHubClient().graphql(
+        `query($owner: String!, $repo: String!) {
+          repository(owner: $owner, name: $repo) {
+            ${prsQuery}
+          }
+        }`,
+        { owner, repo },
+      )) as PRCommitAuthorsResult;
+    } catch (error: any) {
+      logger.warn(
+        `Failed to fetch co-authors for PRs ${subset.map(n => `#${n}`).join(', ')}: ${error.message || error}`,
+      );
+      // A number that is not a PR fails the query but keeps the other PRs
+      response = error.data;
+    }
+    for (const number of subset) {
+      const pr = response?.repository?.[`P${number}`];
+      if (pr) {
+        coAuthors[number] = pr.commits.nodes.flatMap(node =>
+          authorLogins(node.commit.authors.nodes),
+        );
+      }
+    }
+  }
+  return coAuthors;
 }
 
 /**
@@ -100,12 +210,19 @@ export const DEFAULT_CHANGELOG_PATH = 'CHANGELOG.md';
 
 export const DEFAULT_UNRELEASED_TITLE = 'Unreleased';
 export const SKIP_CHANGELOG_MAGIC_WORD = '#skip-changelog';
-export const BODY_IN_CHANGELOG_MAGIC_WORD = '#body-in-changelog';
 const DEFAULT_CHANGESET_BODY = '- No documented changes.';
 const VERSION_HEADER_LEVEL = 2;
 const SUBSECTION_HEADER_LEVEL = VERSION_HEADER_LEVEL + 1;
 const SCOPE_HEADER_LEVEL = SUBSECTION_HEADER_LEVEL + 1;
 const MAX_COMMITS_PER_QUERY = 50;
+/** Commits read from a PR to find its co-authors */
+const MAX_PR_COMMITS = 100;
+/** PRs per co-author query; each reads up to {@link MAX_PR_COMMITS} commits */
+const MAX_PRS_PER_QUERY = 25;
+/** Authors read per commit: the git author plus `Co-authored-by` trailers */
+const MAX_COMMIT_AUTHORS = 10;
+/** Authors shown per changelog entry before collapsing into "N others" */
+const MAX_CREDITED_AUTHORS = 3;
 const MAX_LEFTOVERS = 24;
 
 // Ensure subsections are nested under version headers otherwise we won't be
@@ -113,6 +230,34 @@ const MAX_LEFTOVERS = 24;
 if (SUBSECTION_HEADER_LEVEL <= VERSION_HEADER_LEVEL) {
   throw new Error('Subsection headers should nest under version headers!');
 }
+
+/**
+ * Checks whether a commit message or PR body opts out of the changelog with
+ * the {@link SKIP_CHANGELOG_MAGIC_WORD}.
+ *
+ * Mentions inside Markdown code are ignored, so a message that only quotes the
+ * magic word (e.g. documents it as `` `#skip-changelog` ``) is not skipped.
+ */
+export function hasSkipChangelogMagicWord(text: string | undefined): boolean {
+  if (!text?.includes(SKIP_CHANGELOG_MAGIC_WORD)) {
+    return false;
+  }
+  // Check only tokens that hold prose or HTML (e.g. a hidden `<!-- -->`
+  // comment) directly. Containers like lists and tables repeat their
+  // children's source in `raw`, and code tokens are never prose.
+  let found = false;
+  marked.walkTokens(marked.lexer(text), token => {
+    if (
+      (token.type === 'text' || token.type === 'html') &&
+      !('tokens' in token && token.tokens?.length) &&
+      token.raw.includes(SKIP_CHANGELOG_MAGIC_WORD)
+    ) {
+      found = true;
+    }
+  });
+  return found;
+}
+
 /**
  * A single changeset with name and description
  */
@@ -628,8 +773,14 @@ export function prependChangeset(
   return markdown.slice(0, startIdx) + newSection + markdown.slice(startIdx);
 }
 
+/** GitHub logins credited for a changelog entry */
+interface Credits {
+  people: string[];
+  bots: string[];
+}
+
 interface PullRequest {
-  author?: string;
+  credits: Credits;
   number: string;
   hash: string;
   body: string;
@@ -640,6 +791,54 @@ interface PullRequest {
   matchedPattern?: RegExp;
   /** Critical status retained before custom entries or prefix stripping. */
   importantTitle?: string;
+  /** Condensed PR description used only as AI summary context. */
+  description?: string;
+}
+
+/**
+ * Normalizes a GitHub login for comparison. Some GitHub APIs return bot logins
+ * with a `[bot]` suffix and others without it.
+ */
+function authorKey(login: string): string {
+  return login.toLowerCase().replace(/\[bot\]$/, '');
+}
+
+/**
+ * Lists the GitHub logins to credit for a changelog entry: the author first,
+ * then co-authors, without duplicates or authors in `hide_authors`. Bots are
+ * listed separately so that people can be credited first.
+ *
+ * @param author The PR or commit author login
+ * @param authorIsBot Whether the author is a bot account
+ * @param coAuthors Logins of commit authors and co-authors
+ * @returns People and bots to credit, possibly empty
+ */
+function creditAuthors(
+  author: string | undefined,
+  authorIsBot = false,
+  coAuthors: string[] = [],
+): Credits {
+  const hidden =
+    getNormalizedReleaseConfig()?.changelog.hideAuthors ?? new Set<string>();
+  const seen = new Set<string>();
+  const credits: Credits = { people: [], bots: [] };
+  for (const login of [author, ...coAuthors]) {
+    if (!login) {
+      continue;
+    }
+    const key = authorKey(login);
+    if (seen.has(key) || hidden.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    // Co-authors only identify bots by their `[bot]` login suffix
+    if ((login === author && authorIsBot) || /\[bot\]$/i.test(login)) {
+      credits.bots.push(login.replace(/\[bot\]$/i, ''));
+    } else {
+      credits.people.push(login);
+    }
+  }
+  return credits;
 }
 
 /**
@@ -649,19 +848,19 @@ interface PullRequest {
  *
  * @param raw Raw commit/PR info
  * @param defaultTitle The default title to use if no custom entries (usually PR title)
- * @param fallbackBody Optional fallback body to check for magic word (used for leftovers)
  * @returns Array of PullRequest entries
  */
 function createPREntriesFromRaw(
   raw: {
     author?: string;
+    authorIsBot?: boolean;
+    coAuthors?: string[];
     pr?: string;
     hash: string;
     prBody?: string | null;
     highlight?: boolean;
   },
   defaultTitle: string,
-  fallbackBody?: string,
   important = false,
 ): PullRequest[] {
   const importantTitle =
@@ -669,10 +868,11 @@ function createPREntriesFromRaw(
       ? defaultTitle
       : undefined;
   const customEntries = extractChangelogEntry(raw.prBody);
+  const credits = creditAuthors(raw.author, raw.authorIsBot, raw.coAuthors);
 
   if (customEntries) {
     return customEntries.map(entry => ({
-      author: raw.author,
+      credits,
       number: raw.pr ?? '',
       hash: raw.hash,
       body: entry.nestedContent ?? '',
@@ -682,29 +882,24 @@ function createPREntriesFromRaw(
     }));
   }
 
-  // For default entries, only include body if it contains the magic word
-  let body = '';
-  if (raw.prBody?.includes(BODY_IN_CHANGELOG_MAGIC_WORD)) {
-    body = raw.prBody;
-  } else if (fallbackBody?.includes(BODY_IN_CHANGELOG_MAGIC_WORD)) {
-    body = fallbackBody;
-  }
-
   return [
     {
-      author: raw.author,
+      credits,
       number: raw.pr ?? '',
       hash: raw.hash,
-      body,
+      body: '',
       title: defaultTitle,
       highlight: raw.highlight,
       importantTitle,
+      description: summaryDescription(raw.prBody),
     },
   ];
 }
 
 interface Commit {
   author?: string;
+  authorIsBot?: boolean;
+  coAuthors?: string[];
   hash: string;
   title: string;
   body: string;
@@ -727,6 +922,10 @@ interface RawCommitInfo {
   title: string;
   body: string;
   author?: string;
+  /** Whether the author is a bot account */
+  authorIsBot?: boolean;
+  /** GitHub logins credited after `author`, e.g. from `Co-authored-by` trailers */
+  coAuthors?: string[];
   pr?: string;
   prTitle?: string;
   prBody?: string;
@@ -872,6 +1071,8 @@ export interface ReleaseConfig {
       labels?: string[];
       authors?: string[];
     };
+    /** Authors never credited in entries. Their PRs are still included. */
+    hide_authors?: string[];
     categories?: ReleaseConfigCategory[];
   };
 }
@@ -943,6 +1144,8 @@ export interface NormalizedReleaseConfig {
       labels: Set<string>;
       authors: Set<string>;
     };
+    /** Normalized logins (see `authorKey`) never credited in entries */
+    hideAuthors: Set<string>;
     categories: NormalizedCategory[];
   };
 }
@@ -1017,6 +1220,9 @@ export function normalizeReleaseConfig(
         labels: new Set<string>(),
         authors: new Set<string>(),
       },
+      hideAuthors: new Set(
+        (config.changelog.hide_authors ?? []).map(authorKey),
+      ),
       categories: [],
     },
   };
@@ -1123,7 +1329,7 @@ export function getNormalizedReleaseConfig(): NormalizedReleaseConfig | null {
       logger.warn(
         `The following changelog categories have no 'semver' field and won't contribute to ` +
           `version bump detection: ${categoriesWithoutSemver.map(t => `"${t}"`).join(', ')}. ` +
-          `See: https://getsentry.github.io/craft/configuration/#auto-mode`,
+          `See: https://craft.sentry.dev/changelogs/#categories`,
       );
     }
   }
@@ -1151,7 +1357,7 @@ export function shouldExcludePR(
   body?: string,
 ): boolean {
   // Check for magic word in body
-  if (body?.includes(SKIP_CHANGELOG_MAGIC_WORD)) {
+  if (hasSkipChangelogMagicWord(body)) {
     return true;
   }
 
@@ -1319,7 +1525,7 @@ const SHORT_SHA_LENGTH = 8;
 
 interface ChangelogEntry {
   title: string;
-  author?: string;
+  credits: Credits;
   prNumber?: string;
   hash: string;
   body?: string;
@@ -1366,6 +1572,9 @@ export function stripTitle(
 /**
  * Formats a single changelog entry with consistent full markdown link format.
  * Format: `- Title by @author in [#123](pr-url)` or `- Title in [abcdef12](commit-url)`
+ * Several authors render as `@a and @b`, `@a, @b and @c`, or `@a, @b and 2 others`.
+ * Bots follow people, as in `@a with @some-bot`. A bot that is the only
+ * credited author renders on its own, as in `by @dependabot`.
  * When highlight is true, the entry is prefixed with `> ` (blockquote).
  * When disableMentions is true, uses `**author**` instead of `@author` to avoid pinging.
  * When disablePRLinks is true, uses plain `#123` instead of markdown links to avoid cross-references.
@@ -1389,11 +1598,27 @@ function formatChangelogEntry(
   let text = `- ${title}`;
 
   // Format author reference: use bold instead of @ mention when disableMentions is true
-  const authorRef = entry.author
-    ? disableMentions
-      ? `**${entry.author}**`
-      : `@${entry.author}`
-    : null;
+  const formatAuthors = (authors: string[]): string | undefined => {
+    const refs = authors.map(author =>
+      disableMentions ? `**${author}**` : `@${author}`,
+    );
+    const shown =
+      refs.length > MAX_CREDITED_AUTHORS
+        ? [
+            ...refs.slice(0, MAX_CREDITED_AUTHORS - 1),
+            `${refs.length - MAX_CREDITED_AUTHORS + 1} others`,
+          ]
+        : refs;
+    return shown.length > 1
+      ? `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}`
+      : shown[0];
+  };
+  const peopleRef = formatAuthors(entry.credits.people);
+  const botsRef = formatAuthors(entry.credits.bots);
+  const authorRef =
+    peopleRef && botsRef
+      ? `${peopleRef} with ${botsRef}`
+      : peopleRef || botsRef;
 
   if (entry.prNumber) {
     // Format PR reference: use backticks to prevent GitHub auto-linking when disablePRLinks is true
@@ -1416,24 +1641,10 @@ function formatChangelogEntry(
     }
   }
 
-  // Add body content
-  // Two cases: 1) legacy magic word behavior, 2) nested content from structured changelog entries
-  if (entry.body) {
-    if (entry.body.includes(BODY_IN_CHANGELOG_MAGIC_WORD)) {
-      // Legacy behavior: extract and format body with magic word
-      const body = entry.body.replace(BODY_IN_CHANGELOG_MAGIC_WORD, '').trim();
-      if (body) {
-        text += `\n  ${body}`;
-      }
-    } else if (entry.body.trim()) {
-      // New behavior: nested content from parsed changelog entries
-      // Don't trim() before splitting to preserve indentation on all lines
-      const lines = entry.body.split('\n');
-      for (const line of lines) {
-        // Each line already has the proper indentation from parsing
-        text += `\n${line}`;
-      }
-    }
+  // Only curated changelog entries carry nested body content.
+  if (entry.body?.trim()) {
+    // Preserve indentation from the structured entry parser.
+    for (const line of entry.body.split('\n')) text += `\n${line}`;
   }
 
   // Apply blockquote highlighting if requested
@@ -1462,6 +1673,17 @@ export interface ChangelogResult {
   matchedCommitsWithSemver: number;
   /** Whether the current PR was skipped (only set when using --pr flag) */
   prSkipped?: boolean;
+  /**
+   * Whether the current PR changes no files in the active workspace, so it
+   * won't be listed in that workspace's changelog (only set when using --pr
+   * flag with a workspace selected)
+   */
+  prOutsideWorkspace?: boolean;
+  /**
+   * The current PR's own entry, rendered without the rest of the changelog
+   * (only set when using --pr flag)
+   */
+  prEntry?: string;
 }
 
 /**
@@ -1582,7 +1804,25 @@ export async function generateChangelogWithHighlight(
   // Step 2: Calculate bump type for this specific PR (used for both skipped and non-skipped PRs)
   const prBumpType = getBumpTypeForPR(prInfo);
 
-  // Step 3: Check if PR should be skipped - bypass changelog generation but still return bump type
+  // Step 3: With a workspace selected, apply the same path rules as the
+  // workspace's release changelog. A PR outside the workspace neither appears
+  // in its changelog nor bumps its version.
+  const belongsToWorkspace = await getWorkspaceChangeFilter();
+  if (
+    belongsToWorkspace &&
+    !belongsToWorkspace(await fetchPRFiles(currentPRNumber))
+  ) {
+    return {
+      changelog: '',
+      bumpType: null,
+      totalCommits: 0,
+      matchedCommitsWithSemver: 0,
+      prSkipped: false,
+      prOutsideWorkspace: true,
+    };
+  }
+
+  // Step 3b: Check if PR should be skipped - bypass changelog generation but still return bump type
   if (shouldSkipCurrentPR(prInfo)) {
     return {
       changelog: '',
@@ -1612,6 +1852,8 @@ export async function generateChangelogWithHighlight(
       title: prInfo.title.trim(),
       body: prInfo.body,
       author: prInfo.author,
+      authorIsBot: prInfo.authorIsBot,
+      coAuthors: (await fetchPRCoAuthors([currentPRStr]))[currentPRStr],
       pr: currentPRStr,
       prTitle: prInfo.title,
       prBody: prInfo.body,
@@ -1642,6 +1884,17 @@ export async function generateChangelogWithHighlight(
     true,
   );
 
+  // The PR's entry on its own, for previews that span several changelogs
+  const prEntry = currentPRSurvived
+    ? await serializeChangelog(
+        categorizeCommits(filteredCommits.filter(c => c.highlight)).data,
+        MAX_LEFTOVERS,
+        true,
+        true,
+        false,
+      )
+    : '';
+
   // Determine bump type:
   // - If current PR survived revert processing, use its specific bump type (PR 676 fix)
   //   This shows "what is this PR's contribution to the version bump"
@@ -1652,6 +1905,7 @@ export async function generateChangelogWithHighlight(
   return {
     changelog,
     prSkipped: false,
+    prEntry,
     bumpType,
     totalCommits: stats.totalCommits,
     matchedCommitsWithSemver: stats.matchedCommitsWithSemver,
@@ -1674,7 +1928,7 @@ async function fetchRawCommitInfo(
 ): Promise<RawCommitInfo[]> {
   // Early filter: skip commits with magic word in commit body (optimization to avoid GitHub API calls)
   const gitCommits = (await getChangesSince(git, rev, until)).filter(
-    ({ body }) => !body.includes(SKIP_CHANGELOG_MAGIC_WORD),
+    ({ body }) => !hasSkipChangelogMagicWord(body),
   );
 
   const githubCommits = await getPRAndLabelsFromCommit(
@@ -1687,29 +1941,54 @@ async function fetchRawCommitInfo(
   // 1. Rebase-merge workflows where multiple commits share the same PR number
   // 2. Already-merged PRs that appear in git history when generating previews
   // Note: PR body magic word check is handled by shouldExcludePR in categorizeCommits
-  const seenPRs = new Set<string>();
+  const seenPRs = new Map<string, RawCommitInfo>();
   const result: RawCommitInfo[] = [];
 
   for (const gitCommit of gitCommits) {
     const githubCommit = githubCommits[gitCommit.hash];
     const pr = githubCommit?.pr ?? gitCommit.pr ?? undefined;
 
-    // Deduplicate by PR number, but keep all commits without PR association
-    if (pr) {
-      if (seenPRs.has(pr)) continue;
-      seenPRs.add(pr);
+    // Deduplicate by PR number, but keep all commits without PR association.
+    // Co-authors of every commit in the PR are credited on the kept entry.
+    const seen = pr ? seenPRs.get(pr) : undefined;
+    if (seen) {
+      seen.coAuthors = [
+        ...(seen.coAuthors ?? []),
+        ...(githubCommit?.coAuthors ?? []),
+      ];
+      continue;
     }
 
-    result.push({
+    const commit: RawCommitInfo = {
       hash: gitCommit.hash,
       title: gitCommit.title,
       body: gitCommit.body,
       author: githubCommit?.author,
+      authorIsBot: githubCommit?.authorIsBot,
+      coAuthors: githubCommit?.coAuthors,
       pr,
       prTitle: githubCommit?.prTitle ?? undefined,
       prBody: githubCommit?.prBody ?? undefined,
       labels: githubCommit?.labels ?? [],
-    });
+    };
+    if (pr) {
+      seenPRs.set(pr, commit);
+    }
+    result.push(commit);
+  }
+
+  // A squash merge can drop the `Co-authored-by` trailers of the PR commits,
+  // for example when the merge message is cleared. Read them from the PR.
+  // GraphQL returns PR numbers as numbers despite the `string` type, so
+  // compare them as strings.
+  const withoutCoAuthors = [...seenPRs.values()].filter(
+    commit => !commit.coAuthors?.length,
+  );
+  const prCoAuthors = await fetchPRCoAuthors(
+    withoutCoAuthors.map(commit => String(commit.pr)),
+  );
+  for (const commit of withoutCoAuthors) {
+    commit.coAuthors = prCoAuthors[String(commit.pr)] ?? commit.coAuthors;
   }
 
   return result;
@@ -1772,6 +2051,8 @@ function categorizeCommits(rawCommits: RawCommitInfo[]): RawChangelogResult {
       // No category match - goes to leftovers
       leftovers.push({
         author: raw.author,
+        authorIsBot: raw.authorIsBot,
+        coAuthors: raw.coAuthors,
         hash: raw.hash,
         title: raw.title,
         body: raw.body,
@@ -1807,7 +2088,6 @@ function categorizeCommits(rawCommits: RawCommitInfo[]): RawChangelogResult {
       const prEntries = createPREntriesFromRaw(
         raw,
         prTitle,
-        raw.body,
         matchedCategory?.semver === 'major' ||
           /\bsecurity\b/i.test(categoryTitle),
       );
@@ -1907,15 +2187,30 @@ async function serializeChangelog(
       changelogSections.push(markdownHeader(SUBSECTION_HEADER_LEVEL, title));
     categoryPositions.set(currentCategory.id, changelogSections.length);
   };
+  /** `prs[i]` is the source of rendered `items[i]`. */
   const addEntries = (
     title: string,
     items: string[],
+    prs: PullRequest[],
     scope?: string,
-    importantEntries?: Record<number, string>,
   ) => {
     const id = `group:${groupIndex++}`;
+    const byIndex = (value: (pr: PullRequest) => string | undefined) =>
+      Object.fromEntries(
+        prs.flatMap((pr, index) => {
+          const text = value(pr);
+          return text ? [[index, text]] : [];
+        }),
+      );
     summaryPositions.set(id, changelogSections.length);
-    currentCategory.groups.push({ id, title, items, scope, importantEntries });
+    currentCategory.groups.push({
+      id,
+      title,
+      items,
+      scope,
+      importantEntries: byIndex(pr => pr.importantTitle),
+      descriptions: byIndex(pr => pr.description),
+    });
     changelogSections.push(items.join('\n'));
   };
   const { repo, owner } = await getGlobalGitHubConfig();
@@ -1965,13 +2260,15 @@ async function serializeChangelog(
     });
 
     // Check if any scope has multiple entries (would get its own header)
-    const hasScopeHeaders = [...category.scopeGroups.entries()].some(
-      ([s, entries]) => s !== null && entries.length > 1,
-    );
+    const hasScopeHeaders =
+      scopeGroupingEnabled &&
+      [...category.scopeGroups.entries()].some(
+        ([s, entries]) => s !== null && entries.length > 1,
+      );
 
     // Collect entries without headers to combine them into a single section
     const entriesWithoutHeaders: string[] = [];
-    const importantWithoutHeaders: Record<number, string> = {};
+    const prsWithoutHeaders: PullRequest[] = [];
 
     for (const [scope, prs] of sortedScopes) {
       // Determine scope header:
@@ -1993,7 +2290,7 @@ async function serializeChangelog(
         formatChangelogEntry(
           {
             title: stripTitle(pr.title, pr.matchedPattern, !showsScopeHeader),
-            author: pr.author,
+            credits: pr.credits,
             prNumber: pr.number,
             hash: pr.hash,
             body: pr.body,
@@ -2004,22 +2301,13 @@ async function serializeChangelog(
           disablePRLinks,
         ),
       );
-      const importantEntries = Object.fromEntries(
-        prs.flatMap((pr, index) =>
-          pr.importantTitle ? [[index, pr.importantTitle]] : [],
-        ),
-      );
-
       if (scopeHeader) {
         changelogSections.push(markdownHeader(SCOPE_HEADER_LEVEL, scopeHeader));
-        addEntries(scopeHeader, prEntries, scopeHeader, importantEntries);
+        addEntries(scopeHeader, prEntries, prs, scopeHeader);
       } else {
         // No header for this scope group - collect entries to combine later
-        for (const [index, title] of Object.entries(importantEntries))
-          importantWithoutHeaders[
-            entriesWithoutHeaders.length + Number(index)
-          ] = title;
         entriesWithoutHeaders.push(...prEntries);
+        prsWithoutHeaders.push(...prs);
       }
     }
 
@@ -2029,12 +2317,7 @@ async function serializeChangelog(
       if (hasScopeHeaders) {
         changelogSections.push(markdownHeader(SCOPE_HEADER_LEVEL, 'Other'));
       }
-      addEntries(
-        category.title,
-        entriesWithoutHeaders,
-        undefined,
-        importantWithoutHeaders,
-      );
+      addEntries(category.title, entriesWithoutHeaders, prsWithoutHeaders);
     }
   }
 
@@ -2043,29 +2326,29 @@ async function serializeChangelog(
     // Only add "Other" section header if there are other category sections
     beginCategory('Other', changelogSections.length > 0);
     const leftoverEntries: string[] = [];
-    const importantLeftovers: Record<number, string> = {};
+    const leftoverPrs: PullRequest[] = [];
     for (const commit of leftovers.slice(0, maxLeftovers)) {
       // Create PR entries (handles custom changelog entries if present)
       const prEntries = createPREntriesFromRaw(
         {
           author: commit.author,
+          authorIsBot: commit.authorIsBot,
+          coAuthors: commit.coAuthors,
           pr: commit.pr ?? undefined,
           hash: commit.hash,
           prBody: commit.prBody,
           highlight: commit.highlight,
         },
         (commit.prTitle ?? commit.title).trim(),
-        commit.body, // fallback for magic word check
       );
 
       for (const pr of prEntries) {
-        if (pr.importantTitle)
-          importantLeftovers[leftoverEntries.length] = pr.importantTitle;
+        leftoverPrs.push(pr);
         leftoverEntries.push(
           formatChangelogEntry(
             {
               title: pr.title,
-              author: pr.author,
+              credits: pr.credits,
               prNumber: pr.number || undefined,
               hash: pr.hash,
               repoUrl,
@@ -2078,7 +2361,7 @@ async function serializeChangelog(
         );
       }
     }
-    addEntries('Other', leftoverEntries, undefined, importantLeftovers);
+    addEntries('Other', leftoverEntries, leftoverPrs);
     if (nLeftovers > maxLeftovers) {
       changelogSections.push(`_Plus ${nLeftovers - maxLeftovers} more_`);
     }
@@ -2100,11 +2383,11 @@ async function serializeChangelog(
       const categorySummary = summary.categories[category.id];
       for (const group of category.groups) {
         const scopeSummary = summary.scopes[group.id];
-        if (scopeSummary || categorySummary)
+        if (scopeSummary)
           changelogSections[summaryPositions.get(group.id)!] =
-            formatSummaryWithDetails(scopeSummary || '', group.items);
+            `${formatSummaryText(scopeSummary)}\n\n${group.items.join('\n')}`;
       }
-      // Keep scope headings and prose visible instead of nesting details blocks.
+      // Summaries supplement the original entries without hiding their content.
       if (categorySummary)
         changelogSections.splice(
           categoryPositions.get(category.id)!,
@@ -2112,17 +2395,8 @@ async function serializeChangelog(
           formatSummaryText(categorySummary),
         );
     }
-    if (summary.release.length) {
-      // Retain validated coverage for every category without displaying a breakdown.
-      const statements = summary.release.map(statement =>
-        formatSummaryText(statement.summary),
-      );
-      const perParagraph = Math.ceil(statements.length / 3);
-      const paragraphs: string[] = [];
-      for (let i = 0; i < statements.length; i += perParagraph)
-        paragraphs.push(statements.slice(i, i + perParagraph).join(' '));
-      changelogSections.unshift(paragraphs.join('\n\n'));
-    }
+    if (summary.release)
+      changelogSections.unshift(formatSummaryText(summary.release));
   }
   return changelogSections.join('\n\n');
 }
@@ -2167,12 +2441,15 @@ interface CommitInfo {
   author: {
     user?: { login: string };
   };
+  authors?: CommitAuthors;
   associatedPullRequests: {
     nodes: Array<{
       number: string;
       title: string;
       body: string;
       author?: {
+        /** GraphQL type of the author; `Bot` for GitHub App accounts */
+        __typename?: string;
         login: string;
       };
       labels: {
@@ -2197,6 +2474,8 @@ export async function getPRAndLabelsFromCommit(hashes: string[]): Promise<
     /* hash */ string,
     {
       author?: string;
+      authorIsBot?: boolean;
+      coAuthors: string[];
       pr: string | null;
       prTitle: string | null;
       prBody: string | null;
@@ -2235,9 +2514,14 @@ export async function getPRAndLabelsFromCommit(hashes: string[]): Promise<
       author {
         user { login }
       }
+      authors(first: ${MAX_COMMIT_AUTHORS}) {
+        nodes { user { login } }
+      }
       associatedPullRequests(first: 1) {
         nodes {
           author {
+            # Identifies bots, whose PR author login lacks the [bot] suffix
+            __typename
             login
           }
           number
@@ -2296,12 +2580,16 @@ export async function getPRAndLabelsFromCommit(hashes: string[]): Promise<
   return Object.fromEntries(
     Object.entries(commitInfo).map(([hash, commit]) => {
       const pr = commit?.associatedPullRequests.nodes[0];
+      // The git author always comes first, followed by `Co-authored-by` trailers
+      const coAuthors = authorLogins(commit?.authors?.nodes.slice(1));
       return [
         // Strip the prefix on the hash we used to workaround in GraphQL
         hash.slice(1),
         pr
           ? {
               author: pr.author?.login,
+              authorIsBot: pr.author?.__typename === 'Bot',
+              coAuthors,
               pr: pr.number,
               prTitle: pr.title,
               prBody: pr.body,
@@ -2309,6 +2597,7 @@ export async function getPRAndLabelsFromCommit(hashes: string[]): Promise<
             }
           : {
               author: commit?.author.user?.login,
+              coAuthors,
               pr: null,
               prTitle: null,
               prBody: null,

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync } from 'fs';
 
 import { safeFs } from '../utils/dryRun';
 import { dirname, join } from 'path';
+import * as semver from 'semver';
 import * as shellQuote from 'shell-quote';
 import stringLength from 'string-length';
 
@@ -16,11 +17,15 @@ import {
   expandWorkspaceTargets,
   getNoMergeConfig,
   getActiveWorkspace,
+  getReleaseUnitDir,
 } from '../config';
 import { formatTable, logger } from '../logger';
 import {
+  type CraftProjectConfig,
   type GitHubGlobalConfig,
+  type PostReleaseBumpConfig,
   TargetConfig,
+  VersioningPolicy,
 } from '../schemas/project_config';
 import { getAllTargetNames, getTargetByName, SpecialTarget } from '../targets';
 import { BaseTarget } from '../targets/base';
@@ -31,7 +36,7 @@ import {
 } from '../utils/errors';
 import { withTempDir } from '../utils/files';
 import { stringToRegexp } from '../utils/filters';
-import { promptConfirmation } from '../utils/helpers';
+import { isDryRun, promptConfirmation } from '../utils/helpers';
 import { formatArtifactConfigForError, formatSize } from '../utils/strings';
 import {
   catchKeyboardInterrupt,
@@ -52,6 +57,9 @@ import {
 import { withTracing } from '../utils/tracing';
 import { buildReleaseCommandEnv } from '../utils/releaseCommandEnv';
 import { getPublishStatePath } from '../utils/publishState';
+import { DEFAULT_CALVER_CONFIG, getNextCalVerPeriod } from '../utils/calver';
+import { runPreReleaseCommand } from '../utils/preReleaseCommand';
+import { resolveVersionBumpMergeConflicts } from '../utils/versionConflicts';
 
 /** Default path to post-release script, relative to project root */
 const DEFAULT_POST_RELEASE_SCRIPT_PATH = join('scripts', 'post-release.sh');
@@ -463,6 +471,70 @@ export class BranchCleanupError extends Error {
 }
 
 /**
+ * Error thrown when every target published but the release branch could not
+ * be merged into the merge target. Retrying the publish skips the published
+ * targets and only merges.
+ */
+export class ReleaseBranchMergeError extends Error {
+  public __proto__: Error;
+
+  public constructor(message: string, options?: ErrorOptions) {
+    const trueProto = new.target.prototype;
+    super(message, options);
+    this.__proto__ = trueProto;
+  }
+}
+
+/**
+ * Explains why the release branch merge failed and how to recover.
+ */
+function describeMergeFailure(
+  mergeError: unknown,
+  branchName: string,
+  remoteName: string,
+): string {
+  const lines = [
+    `Failed to merge release branch "${branchName}" into the target branch.`,
+    `All publish targets completed successfully. Retrying the publish skips them and only merges the release branch.`,
+  ];
+  if (mergeError instanceof MergeConflictError) {
+    lines.push(`Merge conflict — both ort and resolve strategies failed.`);
+    if (mergeError.conflictedFiles.length > 0) {
+      lines.push(``, `Conflicting files:`);
+      for (const file of mergeError.conflictedFiles) {
+        lines.push(`  - ${file}`);
+      }
+    }
+    if (mergeError.diff) {
+      lines.push(``, `Diff:`, mergeError.diff);
+    }
+    lines.push(
+      ``,
+      `To recover, do one of these, then retry the publish:`,
+      `  - Merge the target branch into "${branchName}", resolve the conflicts, and push it. The retry merges the new release branch head.`,
+      `  - Merge "${branchName}" into the target branch yourself with a merge commit (not a squash), resolving the conflicts.`,
+    );
+  } else if (mergeError instanceof PushError) {
+    lines.push(
+      `The merge succeeded locally but pushing to the remote failed.`,
+      `This is likely due to an expired authentication token (common for long-running publishes > 1 hour).`,
+      ``,
+      `Retry the publish with valid credentials.`,
+    );
+  } else {
+    lines.push(
+      ``,
+      `Fix the cause below and retry the publish, or merge the release branch into the target branch and delete it yourself: git push ${remoteName} --delete ${branchName}`,
+    );
+  }
+  lines.push(
+    ``,
+    `Error: ${mergeError instanceof Error ? mergeError.message : String(mergeError)}`,
+  );
+  return lines.join('\n');
+}
+
+/**
  * Deals with the release branch after publishing is done
  *
  * Leave the release branch unmerged, or merge it but preserve it if the
@@ -475,6 +547,8 @@ export class BranchCleanupError extends Error {
  * @param [mergeTarget] Branch name to merge the release branch into
  * @param keepBranch If set to "true", the branch will not be deleted
  * @param mergeSource Revision to merge, defaults to the release branch
+ * @param releaseVersion Released version, used to resolve conflicts that
+ *   only come from the release branch's version bump
  */
 export async function handleReleaseBranch(
   git: SimpleGit,
@@ -484,6 +558,7 @@ export async function handleReleaseBranch(
   mergeTarget?: string,
   keepBranch = false,
   mergeSource = branch,
+  releaseVersion?: string,
 ): Promise<void> {
   if (!mergeTarget) {
     mergeTarget = await getDefaultBranch(git, remoteName);
@@ -491,18 +566,7 @@ export async function handleReleaseBranch(
   logger.debug(`Checking out merge target branch:`, mergeTarget);
   await git.checkout(mergeTarget);
 
-  logger.debug(`Pulling latest changes from ${remoteName}/${mergeTarget}`);
-  try {
-    await git.pull(remoteName, mergeTarget, ['--rebase']);
-  } catch (pullError) {
-    // Pull --rebase failure can leave the repo in an active rebase state
-    try {
-      await git.raw(['rebase', '--abort']);
-    } catch {
-      logger.trace('git rebase --abort failed (may be no rebase in progress)');
-    }
-    throw pullError;
-  }
+  await pullWithRebase(git, remoteName, mergeTarget);
 
   // Stage 1: Merge — if this fails, it's a merge conflict
   logger.debug(`Merging ${mergeSource} into: ${mergeTarget}`);
@@ -523,7 +587,16 @@ export async function handleReleaseBranch(
     // Retry with the resolve strategy which handles criss-cross ambiguities
     // differently and often succeeds where ort fails on files like CHANGELOG.md
     try {
-      await git.merge(['-s', 'resolve', '--no-ff', '--no-edit', mergeSource]);
+      try {
+        await git.merge(['-s', 'resolve', '--no-ff', '--no-edit', mergeSource]);
+      } catch (resolveError) {
+        // The target branch may have changed lines next to the version
+        // strings the release branch bumped. Those conflicts have an obvious
+        // resolution.
+        if (!(await tryResolveVersionBumpConflicts(git, releaseVersion))) {
+          throw resolveError;
+        }
+      }
     } catch (resolveError) {
       // Resolve also failed — capture conflict details before aborting
       let conflictedFiles: string[] = [];
@@ -605,6 +678,155 @@ export async function handleReleaseBranch(
       );
     }
   }
+}
+
+/**
+ * Commits the merge resolution when every conflict of the in-progress merge
+ * only comes from the release version bump.
+ *
+ * @returns Whether the merge was resolved and committed
+ */
+async function tryResolveVersionBumpConflicts(
+  git: SimpleGit,
+  releaseVersion: string | undefined,
+): Promise<boolean> {
+  if (!releaseVersion) {
+    return false;
+  }
+  try {
+    const resolvedFiles = await resolveVersionBumpMergeConflicts(
+      git,
+      releaseVersion,
+    );
+    if (!resolvedFiles) {
+      return false;
+    }
+    logger.info(
+      `Resolved conflicts caused only by the ${releaseVersion} version bump in: ${resolvedFiles.join(', ')}`,
+    );
+    return true;
+  } catch (resolutionError) {
+    logger.debug(
+      'Could not auto-resolve the version bump conflicts:',
+      resolutionError,
+    );
+    return false;
+  }
+}
+
+/**
+ * Pull with `--rebase`, aborting the rebase if the pull fails so the
+ * repository isn't left mid-rebase.
+ */
+async function pullWithRebase(
+  git: SimpleGit,
+  remoteName: string,
+  branch: string,
+): Promise<void> {
+  logger.debug(`Pulling latest changes from ${remoteName}/${branch}`);
+  try {
+    await git.pull(remoteName, branch, ['--rebase']);
+  } catch (pullError) {
+    try {
+      await git.raw(['rebase', '--abort']);
+    } catch {
+      logger.trace('git rebase --abort failed (may be no rebase in progress)');
+    }
+    throw pullError;
+  }
+}
+
+/** Default `postReleaseBump.version` template */
+const DEFAULT_DEVELOPMENT_VERSION_TEMPLATE = '{{version}}-dev.0';
+
+/**
+ * Bump the release unit to the next development version on the merge target,
+ * then commit and push the change.
+ *
+ * The version is written by the same step `craft prepare` uses: the
+ * `preReleaseCommand`, or the automatic target bumps when there is none.
+ *
+ * @param git Git client, with the merge target checked out
+ * @param remoteName The git remote to push to
+ * @param mergeTarget Branch the release was merged into
+ * @param releasedVersion Version that was just published
+ * @param bumpConfig The `postReleaseBump` configuration
+ * @param config The release unit's configuration
+ */
+async function runPostReleaseBump(
+  git: SimpleGit,
+  remoteName: string,
+  mergeTarget: string,
+  releasedVersion: string,
+  bumpConfig: PostReleaseBumpConfig,
+  config: CraftProjectConfig,
+): Promise<void> {
+  if (semver.prerelease(releasedVersion)) {
+    // A development version derived from a pre-release would sort above the
+    // stable release that hasn't shipped yet.
+    logger.info(
+      `Not bumping the development version after pre-release ${releasedVersion}.`,
+    );
+    return;
+  }
+  const bump =
+    bumpConfig.bump ??
+    (config.versioning?.policy === VersioningPolicy.CalVer
+      ? 'calver'
+      : 'minor');
+  const nextVersion =
+    bump === 'calver'
+      ? getNextCalVerPeriod(
+          releasedVersion,
+          config.versioning?.calver?.format ?? DEFAULT_CALVER_CONFIG.format,
+        )
+      : semver.inc(releasedVersion, bump);
+  if (!nextVersion) {
+    throw new Error(
+      `Cannot derive the next ${bump} version from "${releasedVersion}".`,
+    );
+  }
+  const devVersion = (
+    bumpConfig.version ?? DEFAULT_DEVELOPMENT_VERSION_TEMPLATE
+  ).replaceAll('{{version}}', nextVersion);
+
+  if (isDryRun()) {
+    logger.info(
+      `[dry-run] Would bump the development version to ${devVersion} and push it to ${remoteName}/${mergeTarget}.`,
+    );
+    return;
+  }
+
+  logger.info(`Bumping the development version to ${devVersion}...`);
+  const bumped = await runPreReleaseCommand({
+    oldVersion: releasedVersion,
+    newVersion: devVersion,
+    preReleaseCommand: config.preReleaseCommand,
+    targets: config.targets,
+    rootDir: getReleaseUnitDir(),
+    versionFiles: config.versioning?.files,
+    repoRoot: await git.revparse(['--show-toplevel']),
+  });
+  if (!bumped) {
+    logger.warn(
+      'Not bumping the development version: nothing wrote a version.',
+    );
+    return;
+  }
+
+  const repoStatus = await git.status();
+  if (repoStatus.files.length === 0) {
+    logger.info(`The development version is already ${devVersion}.`);
+    return;
+  }
+  await git.commit('meta: Bump new development version\n\n#skip-changelog', [
+    '--all',
+  ]);
+  await pullWithRebase(git, remoteName, mergeTarget);
+  await git.push(remoteName, mergeTarget);
+  logger.info(
+    `Pushed development version ${devVersion} to ${remoteName}/${mergeTarget}.`,
+  );
 }
 
 /**
@@ -868,6 +1090,7 @@ export async function publishMain(argv: PublishOptions): Promise<any> {
     );
   }
 
+  let mergedInto: string | undefined;
   if (noMerge) {
     const source = argv.noMerge
       ? 'CLI option'
@@ -881,96 +1104,54 @@ export async function publishMain(argv: PublishOptions): Promise<any> {
     earlierStateExists
   ) {
     // Publishing done, MERGE DAT BRANCH!
+    let mergeTarget = argv.mergeTarget;
     try {
+      mergeTarget ||= await getDefaultBranch(git, argv.remote);
       await handleReleaseBranch(
         git,
         argv.remote,
         branchName,
         revision,
-        argv.mergeTarget,
+        mergeTarget,
         argv.keepBranch,
         rev ? revision : branchName,
+        newVersion,
       );
+      mergedInto = mergeTarget;
     } catch (mergeError) {
-      // The merge is a housekeeping step — it must not block the success
-      // signal for a fully-published release. Report to Sentry for
-      // observability but don't fail the command.
-      captureException(mergeError);
+      if (!(mergeError instanceof BranchCleanupError)) {
+        // Every target published, but the release didn't make it back into
+        // the merge target, which also skips the post-release steps. Fail
+        // loudly so the release can be fixed and retried. The publish state
+        // file stays, so the retry skips the published targets.
+        throw new ReleaseBranchMergeError(
+          describeMergeFailure(mergeError, branchName, argv.remote),
+          { cause: mergeError },
+        );
+      }
 
-      const lines: string[] = [];
-      if (mergeError instanceof BranchCleanupError) {
+      // The merge itself was pushed; only the branch cleanup failed.
+      captureException(mergeError);
+      mergedInto = mergeTarget;
+      const lines = [
+        `Failed to clean up release branch "${branchName}" after merging it into the target branch.`,
+      ];
+      if (mergeError.remoteDeleted) {
         lines.push(
-          `Failed to clean up release branch "${branchName}" after merging it into the target branch.`,
-        );
-        if (mergeError.remoteDeleted) {
-          lines.push(
-            `The merge was pushed and the remote release branch was deleted, but deleting the local branch failed.`,
-            `Inspect the local branch before deleting it.`,
-            ``,
-            `To retry safely: git branch -d -- ${branchName}`,
-          );
-        } else {
-          lines.push(
-            `The merge was pushed, but deleting the remote release branch failed.`,
-            `The branch may have advanced beyond the expected release revision ${revision}. Inspect it before cleanup.`,
-            ``,
-            `To retry safely: git push --force-with-lease=refs/heads/${branchName}:${revision} ${argv.remote} :refs/heads/${branchName}`,
-          );
-        }
-      } else if (mergeError instanceof MergeConflictError) {
-        lines.push(
-          `Failed to merge release branch "${branchName}" into the target branch.`,
-        );
-        lines.push(`Merge conflict — both ort and resolve strategies failed.`);
-        if (mergeError.conflictedFiles.length > 0) {
-          lines.push(``);
-          lines.push(`Conflicting files:`);
-          for (const file of mergeError.conflictedFiles) {
-            lines.push(`  - ${file}`);
-          }
-        }
-        if (mergeError.diff) {
-          lines.push(``, `Diff:`, mergeError.diff);
-        }
-        lines.push(
+          `The merge was pushed and the remote release branch was deleted, but deleting the local branch failed.`,
+          `Inspect the local branch before deleting it.`,
           ``,
-          `All publish targets completed successfully — only the post-publish merge failed.`,
-          ``,
-          `To resolve manually:`,
-          `  1. Merge the release branch into the target branch, resolving conflicts`,
-          `  2. Delete the release branch: git push ${argv.remote} --delete ${branchName}`,
-        );
-      } else if (mergeError instanceof PushError) {
-        lines.push(
-          `Failed to merge release branch "${branchName}" into the target branch.`,
-        );
-        lines.push(
-          `The merge succeeded locally but pushing to the remote failed.`,
-          `This is likely due to an expired authentication token (common for long-running publishes > 1 hour).`,
-          ``,
-          `All publish targets completed successfully — only the post-publish push failed.`,
-          ``,
-          `To resolve manually:`,
-          `  1. Re-authenticate (e.g., generate a fresh token)`,
-          `  2. Merge the release branch into the target branch`,
-          `  3. Delete the release branch: git push ${argv.remote} --delete ${branchName}`,
+          `To retry safely: git branch -d -- ${branchName}`,
         );
       } else {
         lines.push(
-          `Failed to merge release branch "${branchName}" into the target branch.`,
-        );
-        lines.push(
-          `All publish targets completed successfully — only the post-publish merge failed.`,
+          `The merge was pushed, but deleting the remote release branch failed.`,
+          `The branch may have advanced beyond the expected release revision ${revision}. Inspect it before cleanup.`,
           ``,
-          `To resolve manually:`,
-          `  1. Merge the release branch into the target branch`,
-          `  2. Delete the release branch: git push ${argv.remote} --delete ${branchName}`,
+          `To retry safely: git push --force-with-lease=refs/heads/${branchName}:${revision} ${argv.remote} :refs/heads/${branchName}`,
         );
       }
-      lines.push(
-        ``,
-        `Error: ${mergeError instanceof Error ? mergeError.message : String(mergeError)}`,
-      );
+      lines.push(``, `Error: ${mergeError.message}`);
       logger.warn(lines.join('\n'));
     }
 
@@ -993,6 +1174,37 @@ export async function publishMain(argv: PublishOptions): Promise<any> {
       `  $ craft publish ${newVersion} --target none\n`,
     ];
     logger.warn(msg.join('\n'));
+  }
+
+  if (config.postReleaseBump) {
+    if (mergedInto) {
+      try {
+        await runPostReleaseBump(
+          git,
+          argv.remote,
+          mergedInto,
+          newVersion,
+          config.postReleaseBump,
+          config,
+        );
+      } catch (bumpError) {
+        // Like the merge, the bump runs after every target has published, so
+        // it must not fail the release.
+        captureException(bumpError);
+        logger.warn(
+          [
+            `Failed to bump the development version after ${newVersion}.`,
+            `All publish targets completed successfully — bump the version on ${mergedInto} manually.`,
+            ``,
+            `Error: ${bumpError instanceof Error ? bumpError.message : String(bumpError)}`,
+          ].join('\n'),
+        );
+      }
+    } else {
+      logger.info(
+        'Not bumping the development version: the release branch was not merged.',
+      );
+    }
   }
 
   // Run the post-release script

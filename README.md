@@ -7,7 +7,64 @@
 
 GitHub Action that automates the `craft prepare` release workflow — creates a release branch, bumps the version, generates a changelog, and opens a publish request issue.
 
-## Usage
+Craft is a command line tool that helps automate and pipeline package releases. It enforces a specific workflow for managing release branches, changelogs, and artifact publishing.
+
+📚 **[Full Documentation](https://craft.sentry.dev/)**
+
+## Quick Start
+
+### Installation
+
+```shell
+curl -fsSL https://craft.sentry.dev/install | bash
+```
+
+Homebrew (`brew install getsentry/tools/craft`), standalone binaries, and npm
+(`npm install -g @sentry/craft`) are also available. See
+[Installation](https://craft.sentry.dev/installation/).
+
+### Usage
+
+```shell
+# Auto-determine version from conventional commits
+craft prepare auto
+
+# Or specify a version explicitly
+craft prepare 1.2.3
+
+# Publish to all configured targets
+craft publish 1.2.3
+```
+
+See the [Quick Start](https://craft.sentry.dev/getting-started/) to set up a project.
+
+## Features
+
+- **[Auto Versioning](https://craft.sentry.dev/versioning/)** - Determine version bumps from conventional commits, or use CalVer
+- **[Multiple Targets](https://craft.sentry.dev/targets/)** - Publish to GitHub, npm, PyPI, Docker, crates.io, NuGet, and more
+- **[Changelog Management](https://craft.sentry.dev/changelogs/)** - Auto-generate changelogs from pull requests or validate manual entries
+- **[AI Changelog Summaries](https://craft.sentry.dev/ai-summaries/)** - Optional release, category, and scope summaries on top of generated changelogs
+- **[Monorepo Support](https://craft.sentry.dev/workspaces/)** - Release independently versioned products from one repository with release workspaces
+- **[CI Integration](https://craft.sentry.dev/release-workflow/)** - Wait for CI to pass, download artifacts, and publish
+- **[GitHub Actions](https://craft.sentry.dev/github-actions/)** - Reusable workflows for releases and changelog previews
+
+## Configuration
+
+Create a `.craft.yml` in your project root:
+
+```yaml
+minVersion: '2.21.0'
+changelog:
+  policy: auto
+targets:
+  - name: github
+  - name: npm
+    access: public
+```
+
+See the [configuration reference](https://craft.sentry.dev/configuration/) for all options.
+
+## GitHub Actions
 
 ```yaml
 name: Release
@@ -20,45 +77,20 @@ on:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: step-security/getsentry-craft@v2
-        with:
-          version: ${{ github.event.inputs.version }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+    uses: getsentry/craft/.github/workflows/release.yml@v2
+    with:
+      version: ${{ inputs.version }}
+    secrets: inherit
 ```
 
-## Inputs
+See [GitHub Actions](https://craft.sentry.dev/github-actions/) for all inputs,
+the composite action, and the changelog preview workflow.
 
-| Input                            | Description                                                                      | Default                                       |
-| -------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------- |
-| `version`                        | Version to release (semver, `"auto"`, `"major"`, `"minor"`, `"patch"`)           | Uses `versioning.policy` from config          |
-| `merge_target`                   | Target branch to merge into                                                      | Default branch                                |
-| `force`                          | Force release even with blockers                                                 | `false`                                       |
-| `blocker_label`                  | Label that blocks releases                                                       | `release-blocker`                             |
-| `publish_repo`                   | Repository for publish issues. Use `"self"` to create issues in the source repo. | `{owner}/publish`                             |
-| `git_user_name`                  | Git committer name                                                               | `github.actor`                                |
-| `git_user_email`                 | Git committer email                                                              | `{actor_id}+{actor}@users.noreply.github.com` |
-| `path`                           | Path that Craft will run inside                                                  | `.`                                           |
-| `workspace`                      | Named Craft release workspace                                                    |                                               |
-| `craft_config_from_merge_target` | Use craft config from the merge target branch                                    | `false`                                       |
-| `craft_version`                  | Version of Craft to install                                                      | Action ref (e.g. `v2`)                        |
+## Contributing
 
-## Outputs
-
-| Output           | Description                              |
-| ---------------- | ---------------------------------------- |
-| `version`        | The resolved version being released      |
-| `branch`         | The release branch name                  |
-| `sha`            | The commit SHA on the release branch     |
-| `previous_tag`   | The tag before this release              |
-| `changelog`      | The changelog for this release           |
-| `changelog_file` | Path to the full changelog file          |
-| `issue_url`      | URL of the created publish request issue |
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 ## License
 

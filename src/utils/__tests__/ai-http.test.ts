@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { parse } from 'valibot';
 import { createSummaryProvider } from '../ai-provider';
 import { AiSummaryConfigSchema } from '../../schemas/project_config';
 import { summarizeChangelog } from '../ai-summary';
 import { setGlobals } from '../helpers';
+import { logger } from '../../logger';
 
 const endpoint = 'https://ai.example.com/v1/chat/completions';
 const config = () =>
-  AiSummaryConfigSchema.parse({
+  parse(AiSummaryConfigSchema, {
     minItems: 0,
     llm: { apiKeyEnv: 'AI_SUMMARY_TOKEN' },
   });
@@ -16,7 +18,7 @@ const request = {
   schema: { type: 'object' },
   signal: new AbortController().signal,
 };
-const completion = (content = '{"summaries":[]}') =>
+const completion = (content = '{"summaries":{}}') =>
   Response.json({
     choices: [
       { finish_reason: 'stop', message: { role: 'assistant', content } },
@@ -33,6 +35,7 @@ beforeEach(() => {
   vi.stubEnv('AI_SUMMARY_TOKEN', 'provider-token');
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   setGlobals({ 'dry-run': false });
@@ -45,7 +48,9 @@ test.each(['false', 'true'])(
     const fetch = vi.fn().mockResolvedValue(completion());
     vi.stubGlobal('fetch', fetch);
     const provider = createSummaryProvider(config());
-    expect(await provider.request(request)).toEqual({ summaries: [] });
+    expect(await provider.request(request)).toEqual({
+      summaries: {},
+    });
     await provider.close();
     expect(fetch.mock.calls[0][0]).toBe(endpoint);
     const options = fetch.mock.calls[0][1];
@@ -98,7 +103,7 @@ test('reads endpoint and token-env from project configuration', async () => {
   const fetch = vi.fn().mockResolvedValue(completion());
   vi.stubGlobal('fetch', fetch);
   const provider = createSummaryProvider(
-    AiSummaryConfigSchema.parse({
+    parse(AiSummaryConfigSchema, {
       llm: { endpoint, apiKeyEnv: 'TEAM_MODEL_TOKEN', model: 'custom-luna' },
     }),
   );
@@ -133,7 +138,7 @@ test('missing default GitHub credential makes no inference request', async () =>
   const fetch = vi.fn();
   vi.stubGlobal('fetch', fetch);
   vi.stubEnv('GITHUB_TOKEN', '');
-  const provider = createSummaryProvider(AiSummaryConfigSchema.parse({}));
+  const provider = createSummaryProvider(parse(AiSummaryConfigSchema, {}));
   await expect(provider.request(request)).rejects.toThrow();
   await provider.close();
   expect(fetch).not.toHaveBeenCalled();
@@ -275,7 +280,7 @@ test('disabled summaries and dry runs make no HTTP or Copilot calls', async () =
   expect(fetch).not.toHaveBeenCalled();
 });
 
-const responsesResult = (content = '{"summaries":[]}') => ({
+const responsesResult = (content = '{"summaries":{}}') => ({
   status: 'completed',
   output: [
     {
@@ -294,8 +299,8 @@ test.each(['false', 'true'])(
     vi.stubEnv('CRAFT_AI_ENDPOINT', '');
     const fetch = vi.fn().mockResolvedValue(Response.json(responsesResult()));
     vi.stubGlobal('fetch', fetch);
-    const provider = createSummaryProvider(AiSummaryConfigSchema.parse({}));
-    expect(await provider.request(request)).toEqual({ summaries: [] });
+    const provider = createSummaryProvider(parse(AiSummaryConfigSchema, {}));
+    expect(await provider.request(request)).toEqual({ summaries: {} });
     await provider.close();
     expect(fetch.mock.calls[0][0]).toBe(
       'https://api.githubcopilot.com/responses',
@@ -356,7 +361,7 @@ test('structured Action settings override file settings; CLI overrides Action en
     );
   vi.stubGlobal('fetch', fetch);
   const provider = createSummaryProvider(
-    AiSummaryConfigSchema.parse({
+    parse(AiSummaryConfigSchema, {
       llm: { endpoint: 'https://file.example/responses', model: 'file-model' },
     }),
   );
@@ -435,7 +440,9 @@ test('Responses reasoning metadata is accepted without exposing reasoning as sum
   output.output.unshift({ type: 'reasoning', summary: [] } as any);
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(output)));
   const provider = createSummaryProvider(config());
-  expect(await provider.request(request)).toEqual({ summaries: [] });
+  expect(await provider.request(request)).toEqual({
+    summaries: {},
+  });
   await provider.close();
 });
 
@@ -451,3 +458,213 @@ test.each(['ai-endpoint', 'ai-model', 'ai-api-key-env'])(
     expect(fetch).not.toHaveBeenCalled();
   },
 );
+
+test.each(['http', 'coverage', 'schema', 'network'])(
+  'fallback reports a sanitized stage and %s failure reason',
+  async failure => {
+    const sensitive =
+      'provider-token private-source https://secret.invalid/?key=credential';
+    const fetch = vi.fn();
+    if (failure === 'http')
+      fetch.mockResolvedValue(new Response(sensitive, { status: 403 }));
+    else if (failure === 'network')
+      fetch.mockRejectedValue(new Error(sensitive));
+    else
+      fetch.mockImplementation(() =>
+        completion(
+          failure === 'schema' ? JSON.stringify({ sensitive }) : undefined,
+        ),
+      );
+    vi.stubGlobal('fetch', fetch);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    expect(
+      await summarizeChangelog(
+        [
+          {
+            id: 'features',
+            title: 'Features',
+            groups: [{ id: 'cli', title: 'CLI', items: [sensitive] }],
+          },
+        ],
+        config(),
+      ),
+    ).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(
+      ['http', 'network'].includes(failure) ? 1 : 2,
+    );
+    const log = warn.mock.calls.flat().join(' ');
+    expect(log).toContain('keeping original entries');
+    expect(log).toContain('stage=scope');
+    expect(log).toContain(
+      `reason=${failure === 'coverage' ? 'coverage' : failure === 'schema' ? 'response-schema' : failure}`,
+    );
+    if (failure === 'http') expect(log).toContain('HTTP 403');
+    for (const value of sensitive.split(' ')) expect(log).not.toContain(value);
+  },
+);
+
+test.each([
+  ['child-id', ['cli:item:0:part:0']],
+  ['short-id', ['cli']],
+  ['unknown-id', ['private-source-token']],
+  ['missing-id', []],
+])(
+  'classifies %s coverage failures without logging returned IDs',
+  async (reason, ids) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() =>
+        completion(
+          JSON.stringify({
+            summaries: Object.fromEntries(
+              ids
+                .map(id => ({
+                  id,
+                  summary: 'Digest.',
+                  importantChanges: [],
+                }))
+                .map(({ id, ...digest }: any) => [id, digest]),
+            ),
+          }),
+        ),
+      ),
+    );
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    expect(
+      await summarizeChangelog(
+        [
+          {
+            id: 'features',
+            title: 'Features',
+            groups: [{ id: 'cli', title: 'CLI', items: ['Add command'] }],
+          },
+        ],
+        config(),
+      ),
+    ).toBeNull();
+    const log = warn.mock.calls.flat().join(' ');
+    expect(log).toContain(`reason=coverage-${reason}`);
+    expect(log).not.toContain('private-source-token');
+    expect(log).not.toContain('cli/');
+  },
+);
+
+test.each(['missing', 'unknown', 'duplicate', 'unsafe'])(
+  'reports %s important-fact failures without exposing facts',
+  async failure => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url, options) => {
+        const node = JSON.parse(JSON.parse(options.body).messages[1].content)
+          .nodes[0];
+        const fact = { id: node.parts[0].sourceId, summary: 'Critical fact.' };
+        const importantChanges =
+          failure === 'missing'
+            ? []
+            : failure === 'unknown'
+              ? [{ ...fact, id: 'private-source-token' }]
+              : failure === 'duplicate'
+                ? [fact, fact]
+                : [fact];
+        return Promise.resolve(
+          completion(
+            JSON.stringify({
+              summaries: {
+                [node.id]: {
+                  summary:
+                    failure === 'unsafe'
+                      ? 'No breaking changes.'
+                      : 'Maintenance.',
+                  importantChanges,
+                },
+              },
+            }),
+          ),
+        );
+      }),
+    );
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    expect(
+      await summarizeChangelog(
+        [
+          {
+            id: 'features',
+            title: 'Features',
+            groups: [
+              {
+                id: 'cli',
+                title: 'CLI',
+                items: ['Breaking change: private-source removed.'],
+              },
+            ],
+          },
+        ],
+        config(),
+      ),
+    ).toBeNull();
+    const log = warn.mock.calls.flat().join(' ');
+    expect(log).toContain(
+      `reason=${failure === 'unsafe' ? 'unsafe-claim' : `important-${failure}`}`,
+    );
+    expect(log).not.toContain('private-source');
+    expect(log).not.toContain('Critical fact.');
+  },
+);
+
+test('HTTP rejection reports its status even if response cancellation stalls', async () => {
+  const cancel = vi.fn(() => new Promise<void>(() => {}));
+  vi.stubGlobal(
+    'fetch',
+    vi
+      .fn()
+      .mockResolvedValue(
+        new Response(new ReadableStream({ cancel }), { status: 403 }),
+      ),
+  );
+  const provider = createSummaryProvider(config());
+  try {
+    await expect(provider.request(request)).rejects.toThrow(
+      'HTTP summary request failed (403)',
+    );
+    expect(cancel).toHaveBeenCalledOnce();
+  } finally {
+    await provider.close();
+  }
+}, 1000);
+
+test('the full summarizer reports its request timeout without exposing the abort error', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockImplementation(
+      (_url, options) =>
+        new Promise((_resolve, reject) => {
+          options.signal.addEventListener(
+            'abort',
+            () => reject(new Error('private-source-token')),
+            { once: true },
+          );
+        }),
+    ),
+  );
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+  try {
+    const result = summarizeChangelog(
+      [
+        {
+          id: 'features',
+          title: 'Features',
+          groups: [{ id: 'cli', title: 'CLI', items: ['Add command'] }],
+        },
+      ],
+      config(),
+    );
+    await vi.advanceTimersByTimeAsync(30001);
+    expect(await result).toBeNull();
+    const log = warn.mock.calls.flat().join(' ');
+    expect(log).toContain('stage=scope; reason=request-timeout');
+    expect(log).not.toContain('private-source-token');
+  } finally {
+    vi.useRealTimers();
+  }
+});

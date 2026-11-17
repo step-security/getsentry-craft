@@ -122,6 +122,7 @@ function runActionStep(
   environment: ReturnType<typeof createActionEnvironment>,
   pathInput = '.',
   locale = 'C',
+  extraEnv: Record<string, string> = {},
 ) {
   return spawnSync('bash', ['-e', '-c', getActionStep(stepName).run!], {
     cwd: environment.directory,
@@ -137,6 +138,7 @@ function runActionStep(
       PATH_INPUT: pathInput,
       VERSION: '',
       WORKSPACE: workspace,
+      ...extraEnv,
     },
   });
 }
@@ -310,4 +312,136 @@ test('clears an inherited workspace before root Craft commands', () => {
   expect(readFileSync(environment.craftCalls, 'utf8')).toBe(
     'prepare\ntargets\n',
   );
+});
+
+test('uses the targets craft prepare listed from the release branch', () => {
+  const environment = createActionEnvironment();
+
+  expect(
+    runActionStep('Read Craft Targets', 'packages/cli', environment, '.', 'C', {
+      PREPARED_TARGETS: '["npm[@sentry/hosting]","github"]',
+    }).status,
+  ).toBe(0);
+
+  expect(readFileSync(environment.craftCalls, 'utf8')).toBe('');
+  expect(readFileSync(environment.output, 'utf8')).toBe(
+    'targets<<EOF\n - [ ] npm[@sentry/hosting]\n - [ ] github\nEOF\n',
+  );
+});
+
+test('lists targets itself when craft prepare did not', () => {
+  const environment = createActionEnvironment();
+
+  expect(
+    runActionStep('Read Craft Targets', 'packages/cli', environment).status,
+  ).toBe(0);
+
+  expect(readFileSync(environment.craftCalls, 'utf8')).toBe(
+    'targets --workspace=packages/cli\n',
+  );
+  expect(readFileSync(environment.output, 'utf8')).toBe(
+    'targets<<EOF\n - [ ] github\nEOF\n',
+  );
+});
+
+function runReleaseBlockerCheck(
+  environment: ReturnType<typeof createActionEnvironment>,
+  { force = 'false', issueCount = '0', listExitCode = 0 } = {},
+) {
+  const ghCalls = join(environment.directory, 'gh-calls');
+  writeFileSync(ghCalls, '');
+  writeFileSync(
+    join(environment.binDirectory, 'gh'),
+    `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$GH_CALLS"
+if [[ "$*" == *"issue list"* ]]; then
+  [[ ${listExitCode} -eq 0 ]] || exit ${listExitCode}
+  printf '%s\\n' '${issueCount}'
+fi
+`,
+  );
+  chmodSync(join(environment.binDirectory, 'gh'), 0o755);
+  const result = spawnSync(
+    'bash',
+    [
+      '-e',
+      '-o',
+      'pipefail',
+      '-c',
+      getActionStep('Check release blockers').run!,
+    ],
+    {
+      cwd: environment.directory,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BLOCKER_LABEL_INPUT: 'release-blocker',
+        FORCE_INPUT: force,
+        GH_CALLS: ghCalls,
+        GITHUB_REPOSITORY: 'getsentry/toolkit',
+        GITHUB_RUN_ID: '42',
+        PATH: `${environment.binDirectory}:${process.env.PATH}`,
+      },
+    },
+  );
+  return { result, ghCalls: readFileSync(ghCalls, 'utf8') };
+}
+
+test('checks release blockers before preparing or requesting a publish', () => {
+  const names = getActionSteps().map(step => step.name);
+  const blockerStep = getActionStep('Check release blockers');
+
+  expect(blockerStep.if).toBeUndefined();
+  expect(blockerStep['continue-on-error']).toBeUndefined();
+  expect(names.indexOf('Check release blockers')).toBeLessThan(
+    names.indexOf('Craft Prepare'),
+  );
+  expect(names.indexOf('Check release blockers')).toBeLessThan(
+    names.indexOf('Request publish'),
+  );
+});
+
+test('fails the step when release-blocking issues are open', () => {
+  const environment = createActionEnvironment();
+  const { result, ghCalls } = runReleaseBlockerCheck(environment, {
+    issueCount: '2',
+  });
+
+  // Run cancellation is asynchronous; the step itself must fail so the
+  // remaining steps never create a publish request.
+  expect(result.status).toBe(1);
+  expect(result.stdout).toContain('Open release-blocking issues found');
+  expect(ghCalls).toBe(
+    'issue list -R getsentry/toolkit -l release-blocker -s open --json number --jq length\n' +
+      'api -X POST repos/getsentry/toolkit/actions/runs/42/cancel\n',
+  );
+});
+
+test('fails closed when release blockers cannot be listed', () => {
+  const environment = createActionEnvironment();
+  const { result, ghCalls } = runReleaseBlockerCheck(environment, {
+    listExitCode: 1,
+  });
+
+  expect(result.status).not.toBe(0);
+  expect(ghCalls).not.toContain('cancel');
+});
+
+test('passes when no release-blocking issues are open', () => {
+  const environment = createActionEnvironment();
+  const { result, ghCalls } = runReleaseBlockerCheck(environment);
+
+  expect(result.status).toBe(0);
+  expect(ghCalls).not.toContain('cancel');
+});
+
+test('skips the release blocker check when forced', () => {
+  const environment = createActionEnvironment();
+  const { result, ghCalls } = runReleaseBlockerCheck(environment, {
+    force: 'true',
+    issueCount: '2',
+  });
+
+  expect(result.status).toBe(0);
+  expect(ghCalls).toBe('');
 });

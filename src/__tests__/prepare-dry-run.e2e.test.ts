@@ -260,9 +260,9 @@ describe('prepare --dry-run e2e', () => {
     const worktreeLines = worktrees.trim().split('\n');
     expect(worktreeLines.length).toBe(1); // Only the main worktree
 
-    // Note: The release branch may still exist in refs because git worktrees
-    // share the same object store. What matters is that the working directory
-    // is unchanged and the worktree is cleaned up.
+    // The worktree shares refs with the checkout, so the release branch it
+    // created must be removed as well.
+    expect((await git.branchLocal()).all).not.toContain('release/1.0.1');
   }, 60000);
 
   test('produces consistent output format', async () => {
@@ -491,6 +491,35 @@ describe('prepare --dry-run e2e', () => {
     );
   }, 60000);
 
+  test('emits the release branch targets, not the default branch ones', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    const outputPath = join(tempDir, 'github-output');
+
+    await git.checkoutLocalBranch('version2');
+    const craftConfig = await readFile(join(tempDir, '.craft.yml'), 'utf8');
+    await writeFile(
+      join(tempDir, '.craft.yml'),
+      craftConfig.replace('targets: []', 'targets:\n  - name: github'),
+    );
+    await git.commit('meta: Add the github target', ['.craft.yml']);
+    await git.push('origin', 'version2', ['--set-upstream']);
+
+    await execFileAsync(
+      CLI_BIN,
+      ['prepare', '1.0.1', '--dry-run', '--no-input'],
+      {
+        cwd: tempDir,
+        env: { ...CLI_ENV, GITHUB_OUTPUT: outputPath },
+      },
+    );
+
+    expect(await readFile(outputPath, 'utf8')).toContain(
+      'targets=["github"]\n',
+    );
+  }, 60000);
+
   test('executes pre-release command and shows diff of changes', async () => {
     tempDir = await createTestRepo();
     // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
@@ -674,6 +703,124 @@ targets: []
     expect(combinedOutput).toContain('release/1.1.0');
   }, 60000);
 
+  test('auto releases 1.1.0 after 1.1.0-alpha.1 with the changes since 1.0.0', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    await writeFile(
+      join(tempDir, '.craft.yml'),
+      `minVersion: "2.14.0"
+github:
+  owner: test-owner
+  repo: test-repo
+versioning:
+  policy: auto
+changelog:
+  policy: auto
+preReleaseCommand: ""
+targets: []
+`,
+    );
+    await git.add('.');
+    await git.commit('feat: Enable automatic versioning');
+    await git.addTag('1.1.0-alpha.1');
+    await git.push('origin', (await git.status()).current!);
+
+    // No commits since the prerelease, so only the changes since the last
+    // stable release can determine the version.
+    const { stdout, stderr } = await execFileAsync(
+      CLI_BIN,
+      ['prepare', '--dry-run', '--no-input'],
+      { cwd: tempDir, env: { ...CLI_ENV, GITHUB_TOKEN: '' } },
+    );
+
+    const output = stdout + stderr;
+    expect(output).toContain('Analyzing commits since 1.0.0');
+    expect(output).toContain('Version bump: 1.1.0-alpha.1 -> 1.1.0');
+    expect(output).toContain('## 1.1.0');
+    expect(output).toContain('Add foo feature in');
+  }, 60000);
+
+  test('auto releases 2.0.0-alpha.1 instead of 2.0.0 after 2.0.0-alpha.0', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    await writeFile(
+      join(tempDir, '.craft.yml'),
+      `minVersion: "2.14.0"
+github:
+  owner: test-owner
+  repo: test-repo
+versioning:
+  policy: auto
+changelog:
+  policy: auto
+preReleaseCommand: ""
+targets: []
+`,
+    );
+    await git.add('.');
+    await git.commit('feat!: Enable automatic versioning');
+    await git.addTag('2.0.0-alpha.0');
+    await writeFile(join(tempDir, 'baz.ts'), 'export const baz = 3;');
+    await git.add('.');
+    await git.commit('fix: Fix baz issue');
+    await git.push('origin', (await git.status()).current!);
+
+    const { stdout, stderr } = await execFileAsync(
+      CLI_BIN,
+      ['prepare', '--dry-run', '--no-input'],
+      { cwd: tempDir, env: { ...CLI_ENV, GITHUB_TOKEN: '' } },
+    );
+
+    const output = stdout + stderr;
+    expect(output).toContain('Version bump: 2.0.0-alpha.0 -> 2.0.0-alpha.1');
+    expect(output).toContain('## 2.0.0-alpha.1');
+    expect(output).toContain('Fix baz issue in');
+    expect(output).not.toContain('Add foo feature in');
+  }, 60000);
+
+  test.each([
+    ['auto', '0.6.0'],
+    ['pre', '0.6.0-alpha.0'],
+    ['major', '1.0.0'],
+  ])(
+    'a breaking change before 1.0.0 with %s releases %s',
+    async (versionArg, expected) => {
+      tempDir = await createTestRepo();
+      // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+      const git = simpleGit(tempDir);
+      await writeFile(
+        join(tempDir, '.craft.yml'),
+        `minVersion: "3.9.0"
+github:
+  owner: test-owner
+  repo: test-repo
+changelog:
+  policy: auto
+preReleaseCommand: ""
+targets: []
+`,
+      );
+      await git.add('.');
+      await git.commit('chore: Enable automatic versioning');
+      await git.addTag('0.5.0');
+      await writeFile(join(tempDir, 'baz.ts'), 'export const baz = 3;');
+      await git.add('.');
+      await git.commit('feat!: Remove the old baz API');
+      await git.push('origin', (await git.status()).current!);
+
+      const { stdout, stderr } = await execFileAsync(
+        CLI_BIN,
+        ['prepare', versionArg, '--dry-run', '--no-input'],
+        { cwd: tempDir, env: { ...CLI_ENV, GITHUB_TOKEN: '' } },
+      );
+
+      expect(stdout + stderr).toContain(`Version bump: 0.5.0 -> ${expected}`);
+    },
+    60000,
+  );
+
   test('prepares a workspace changelog without changing the root changelog', async () => {
     tempDir = await createTestRepo();
     // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
@@ -714,6 +861,111 @@ workspaces:
     expect(await readFile(join(tempDir, 'CHANGELOG.md'), 'utf8')).toContain(
       '## 1.0.0',
     );
+  }, 60000);
+
+  test('bumps an untagged workspace from its package.json version', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    await mkdir(join(tempDir, 'packages', 'cli'), { recursive: true });
+    await writeFile(
+      join(tempDir, '.craft.yml'),
+      `minVersion: "2.29.0"
+github:
+  owner: test-owner
+  repo: test-repo
+changelog:
+  policy: none
+preReleaseCommand: ""
+workspaces:
+  packages/cli:
+    releaseBranchPrefix: release/cli
+    targets:
+      - name: npm
+      - name: github
+        tagPrefix: "cli@"
+`,
+    );
+    await writeFile(
+      join(tempDir, 'packages', 'cli', 'package.json'),
+      JSON.stringify({ name: 'cli', version: '1.0.0-dev.0' }, null, 2),
+    );
+    await git.add('.');
+    await git.commit('chore: Configure CLI workspace');
+    await git.push('origin', (await git.status()).current!);
+
+    const { stdout, stderr } = await execFileAsync(
+      CLI_BIN,
+      [
+        'prepare',
+        'minor',
+        '--workspace=packages/cli',
+        '--dry-run',
+        '--no-input',
+      ],
+      { cwd: tempDir, env: { ...CLI_ENV, GITHUB_TOKEN: '' } },
+    );
+
+    // The root's `1.0.0` tag does not match the `cli@` prefix, so the bump
+    // starts from packages/cli/package.json rather than 0.0.0.
+    expect(stdout + stderr).toContain('Version bump: 1.0.0-dev.0 -> 1.0.0');
+    expect(stdout + stderr).toContain('release/cli/1.0.0');
+  }, 60000);
+
+  test('keeps automatic workspace bumps out of the checkout', async () => {
+    tempDir = await createTestRepo();
+    // eslint-disable-next-line no-restricted-syntax -- Test setup needs direct git access
+    const git = simpleGit(tempDir);
+    await mkdir(join(tempDir, 'packages', 'cli'), { recursive: true });
+    // No preReleaseCommand, so the npm target bumps the version itself.
+    await writeFile(
+      join(tempDir, '.craft.yml'),
+      `minVersion: "2.29.0"
+github:
+  owner: test-owner
+  repo: test-repo
+changelog:
+  policy: none
+workspaces:
+  packages/cli:
+    releaseBranchPrefix: release/cli
+    targets:
+      - name: npm
+      - name: github
+        tagPrefix: "cli@"
+`,
+    );
+    const packageJsonPath = join(tempDir, 'packages', 'cli', 'package.json');
+    const packageJson = JSON.stringify(
+      { name: 'cli', version: '1.0.0-dev.0' },
+      null,
+      2,
+    );
+    await writeFile(packageJsonPath, packageJson);
+    await git.add('.');
+    await git.commit('chore: Configure CLI workspace');
+    await git.push('origin', (await git.status()).current!);
+
+    for (let run = 0; run < 2; run++) {
+      const { stdout, stderr } = await execFileAsync(
+        CLI_BIN,
+        [
+          'prepare',
+          'minor',
+          '--workspace=packages/cli',
+          '--dry-run',
+          '--no-input',
+        ],
+        { cwd: tempDir, env: { ...CLI_ENV, GITHUB_TOKEN: '' } },
+      );
+
+      expect(stdout + stderr).toContain('Version bump: 1.0.0-dev.0 -> 1.0.0');
+      expect(stdout + stderr).toContain('Version bumped by "npm" target');
+      expect(stdout + stderr).toContain('packages/cli/package.json');
+      expect(await readFile(packageJsonPath, 'utf8')).toBe(packageJson);
+      expect((await git.status()).isClean()).toBe(true);
+      expect((await git.branchLocal()).all).not.toContain('release/cli/1.0.0');
+    }
   }, 60000);
 
   test('auto changelog policy creates CHANGELOG.md if it does not exist', async () => {

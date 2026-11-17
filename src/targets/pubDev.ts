@@ -22,6 +22,7 @@ import { withTempDir } from '../utils/files';
 import { checkExecutableIsPresent, spawnProcess } from '../utils/system';
 import { isDryRun } from '../utils/helpers';
 import { logDryRun } from '../utils/dryRun';
+import { setYamlVersion } from '../utils/versionPatterns';
 import { logger } from '../logger';
 
 export const targetSecrets = [
@@ -71,6 +72,27 @@ export class PubDevTarget extends BaseTarget {
   public readonly githubRepo: GitHubGlobalConfig;
 
   /**
+   * Read the version from pubspec.yaml.
+   *
+   * @param rootDir - Project root directory
+   * @returns The version, or undefined if there is no readable pubspec.yaml
+   * or it has no version
+   */
+  public static async readVersion(
+    rootDir: string,
+  ): Promise<string | undefined> {
+    const pubspecPath = join(rootDir, 'pubspec.yaml');
+    if (!existsSync(pubspecPath)) {
+      return undefined;
+    }
+    const pubspec = load(readFileSync(pubspecPath, 'utf-8')) as
+      | Record<string, unknown>
+      | undefined;
+    const version = pubspec?.version;
+    return typeof version === 'string' ? version : undefined;
+  }
+
+  /**
    * Bump version in pubspec.yaml for Dart/Flutter projects.
    *
    * @param rootDir - Project root directory
@@ -88,6 +110,16 @@ export class PubDevTarget extends BaseTarget {
     }
 
     const content = readFileSync(pubspecPath, 'utf-8');
+
+    logger.debug(`Updating version in ${pubspecPath} to ${newVersion}`);
+    // Edit the version in place so comments and formatting survive.
+    const updated = setYamlVersion(content, 'version', newVersion);
+    if (updated !== undefined) {
+      writeFileSync(pubspecPath, updated);
+      return true;
+    }
+
+    // No single top-level version to edit, so set it and re-dump the file.
     const pubspec = load(content) as Record<string, any>;
 
     if (!pubspec || typeof pubspec !== 'object') {
@@ -96,8 +128,6 @@ export class PubDevTarget extends BaseTarget {
     }
 
     pubspec.version = newVersion;
-
-    logger.debug(`Updating version in ${pubspecPath} to ${newVersion}`);
     writeFileSync(pubspecPath, dump(pubspec));
 
     return true;

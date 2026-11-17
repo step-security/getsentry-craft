@@ -9,6 +9,7 @@ import {
 } from 'fs';
 import { globSync } from 'glob';
 import { load } from 'js-yaml';
+import { safeParse } from 'valibot';
 import { tmpdir } from 'os';
 import { join } from 'path';
 /**
@@ -24,11 +25,16 @@ import {
   setActiveWorkspace,
   getActiveWorkspace,
   getConfiguration,
+  getReleaseUnitDir,
   getVersioningPolicy,
   getWorkspaceNames,
+  VERSION_FILES_MIN_VERSION,
   WORKSPACES_MIN_VERSION,
 } from '../config';
-import { CraftProjectConfigSchema } from '../schemas/project_config';
+import {
+  CraftProjectConfigSchema,
+  getVersionFileFormat,
+} from '../schemas/project_config';
 import { logger } from '../logger';
 import { GitHubTarget } from '../targets/github';
 import { NoneArtifactProvider } from '../artifact_providers/none';
@@ -96,7 +102,9 @@ describe('validateConfiguration', () => {
         policy: 'auto',
         scopeGrouping: true,
         includePaths: ['apps/cli-docs'],
+        unownedPaths: 'own',
       },
+      workspaces: { 'packages/cli': {} },
     };
 
     expect(validateConfiguration(data)).toEqual(data);
@@ -110,6 +118,47 @@ describe('validateConfiguration', () => {
     expect(validateConfiguration(data)).toEqual(data);
   });
 
+  test.each([
+    [{}, {}],
+    [
+      { bump: 'calver', version: '{{version}}.dev0' },
+      { bump: 'calver', version: '{{version}}.dev0' },
+    ],
+    [{ version: 'nightly' }, { version: 'nightly' }],
+    [true, {}],
+    ['patch', { bump: 'patch' }],
+    ['calver', { bump: 'calver' }],
+    [false, false],
+  ])('accepts postReleaseBump %j', (postReleaseBump, expected) => {
+    expect(validateConfiguration({ postReleaseBump })).toEqual({
+      postReleaseBump: expected,
+    });
+  });
+
+  test('lets a workspace opt out of an inherited postReleaseBump', () => {
+    const data = {
+      postReleaseBump: { bump: 'patch' },
+      workspaces: { 'packages/cli': { postReleaseBump: false } },
+    };
+
+    expect(validateConfiguration(data)).toEqual(data);
+  });
+
+  test.each([
+    { bump: 'preminor' },
+    { version: '  ' },
+    { version: '${NPM_TOKEN}' },
+    { version: '{{{version}}}' },
+    { version: '$(id)' },
+    { preid: 'dev' },
+    'preminor',
+    [],
+  ])('rejects invalid postReleaseBump %j', postReleaseBump => {
+    expect(() => validateConfiguration({ postReleaseBump })).toThrow(
+      /postReleaseBump/,
+    );
+  });
+
   test('normalizes opt-in AI summary settings from the active schema', () => {
     loadConfigurationFromString('changelog:\n  policy: auto\n  aiSummary: {}');
     expect(getChangelogConfig().aiSummary).toEqual({
@@ -119,9 +168,26 @@ describe('validateConfiguration', () => {
         apiKeyEnv: 'GITHUB_TOKEN',
       },
       minItems: 5,
+      timeout: 120,
       levels: ['release'],
     });
   });
+
+  test.each([0, 30, 600, 3600])('accepts AI summary timeout %s', timeout => {
+    loadConfigurationFromString(
+      `changelog:\n  policy: auto\n  aiSummary:\n    timeout: ${timeout}`,
+    );
+    expect(getChangelogConfig().aiSummary).toMatchObject({ timeout });
+  });
+
+  test.each([-1, 29, 1.5, '600'])(
+    'rejects invalid AI summary timeout %j',
+    timeout => {
+      expect(() =>
+        validateConfiguration({ changelog: { aiSummary: { timeout } } }),
+      ).toThrow(/changelog/);
+    },
+  );
 
   test('normalizes optional AI writing style', () => {
     loadConfigurationFromString(
@@ -273,8 +339,32 @@ describe('validateConfiguration', () => {
 
   test('fails with invalid github config', () => {
     expect(() =>
+<<<<<<< 92c900d9bd06b8ee31168dda5a21bdead5acb650
       validateConfiguration({ github: { owner: 'step-security' } }),
     ).toThrow(/repo.*Required/);
+=======
+      validateConfiguration({ github: { owner: 'getsentry' } }),
+    ).toThrow('github.repo: Invalid key: Expected "repo"');
+  });
+
+  test.each([
+    ['versioning', { versioning: [] }],
+    ['versioning.calver', { versioning: { calver: [] } }],
+    ['changelog', { changelog: [] }],
+    ['changelog.aiSummary', { changelog: { aiSummary: [] } }],
+    ['changelog.aiSummary.llm', { changelog: { aiSummary: { llm: [] } } }],
+    [
+      'statusProvider.config',
+      { statusProvider: { name: 'github', config: [] } },
+    ],
+    ['workspaces', { workspaces: [] }],
+    ['workspaces.cli', { workspaces: { cli: [] } }],
+    ['workspaces.cli.github', { workspaces: { cli: { github: [] } } }],
+  ])('rejects an array for the %s block', (path, data) => {
+    expect(() => validateConfiguration(data)).toThrow(
+      `${path}: Invalid type: Expected Object but received Array`,
+    );
+>>>>>>> c65b1b4efb99dd9095ce242f9c420cb1f4c730ea
   });
 
   test('fails with invalid minVersion format', () => {
@@ -286,7 +376,7 @@ describe('validateConfiguration', () => {
   test('fails with invalid changelog policy', () => {
     expect(() =>
       validateConfiguration({ changelog: { policy: 'invalid' } }),
-    ).toThrow(/changelog/);
+    ).toThrow(/changelog\.policy: .*received "invalid"/);
   });
 
   test.each([
@@ -298,8 +388,34 @@ describe('validateConfiguration', () => {
     'apps\\docs',
   ])('rejects unsafe changelog include path %s', includePath => {
     expect(() =>
-      validateConfiguration({ changelog: { includePaths: [includePath] } }),
-    ).toThrow(/changelog/);
+      validateConfiguration({
+        workspaces: { cli: { changelog: { includePaths: [includePath] } } },
+      }),
+    ).toThrow(/Changelog paths must use safe relative ASCII segments/);
+  });
+
+  test('rejects an unknown unowned paths policy', () => {
+    expect(() =>
+      validateConfiguration({
+        workspaces: { cli: { changelog: { unownedPaths: 'shared' } } },
+      }),
+    ).toThrow(/workspaces\.cli\.changelog/);
+  });
+
+  test.each([
+    ['includePaths', ['apps/cli-docs']],
+    ['unownedPaths', 'exclude'],
+  ])('rejects changelog.%s without release workspaces', (field, value) => {
+    expect(() =>
+      validateConfiguration({ changelog: { policy: 'auto', [field]: value } }),
+    ).toThrow(
+      `changelog.${field}: Only release workspaces support this setting.`,
+    );
+  });
+
+  test('includes unowned paths by default', () => {
+    loadConfigurationFromString('changelog:\n  policy: auto');
+    expect(getChangelogConfig().unownedPaths).toBe('include');
   });
 });
 
@@ -310,7 +426,7 @@ describe('CraftProjectConfigSchema', () => {
       minVersion: '2.14.0',
     };
 
-    const result = CraftProjectConfigSchema.safeParse(data);
+    const result = safeParse(CraftProjectConfigSchema, data);
     expect(result.success).toBe(true);
   });
 
@@ -319,7 +435,7 @@ describe('CraftProjectConfigSchema', () => {
       minVersion: 'not-a-version',
     };
 
-    const result = CraftProjectConfigSchema.safeParse(data);
+    const result = safeParse(CraftProjectConfigSchema, data);
     expect(result.success).toBe(false);
   });
 });
@@ -399,6 +515,17 @@ describe('noMerge config', () => {
       ),
     ).toThrow('Workspace name "__proto__" is not supported.');
   });
+
+  test.each(['constructor', 'prototype'])(
+    'rejects the %s workspace key instead of dropping it',
+    name => {
+      expect(() =>
+        validateConfiguration({
+          workspaces: JSON.parse(`{"${name}": {}}`),
+        }),
+      ).toThrow(`Workspace name "${name}" is not supported.`);
+    },
+  );
 
   test('rejects workspace github.projectPath', () => {
     expect(() =>
@@ -656,6 +783,26 @@ describe('workspaces', () => {
     );
   });
 
+  test('scopes the release unit directory to the selected workspace', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'craft-workspace-dir-'));
+    temporaryDirectories.push(directory);
+    mkdirSync(join(directory, 'packages', 'cli'), { recursive: true });
+    writeFileSync(
+      join(directory, '.craft.yml'),
+      `minVersion: ${WORKSPACES_MIN_VERSION}\nworkspaces:\n  packages/cli: {}\n  cli: {}\n`,
+    );
+    process.chdir(directory);
+    const root = process.cwd();
+
+    setActiveWorkspace(undefined);
+    expect(getReleaseUnitDir()).toBe(root);
+    setActiveWorkspace('packages/cli');
+    expect(getReleaseUnitDir()).toBe(join(root, 'packages', 'cli'));
+    // Aliases that are not directories keep the configuration directory.
+    setActiveWorkspace('cli');
+    expect(getReleaseUnitDir()).toBe(root);
+  });
+
   test('a different workspace resolves independently', () => {
     setActiveWorkspace('mcp');
     const config = loadConfigurationFromString(WS_CONFIG);
@@ -712,6 +859,97 @@ describe('workspaces', () => {
 
     setActiveWorkspace('packages/cli');
     expect(getConfiguration(true).releaseBranchPrefix).toBe('release/package');
+  });
+
+  test('expands workspace placeholders for each glob match', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'craft-workspaces-'));
+    temporaryDirectories.push(directory);
+    for (const name of ['scraps', 'icons']) {
+      mkdirSync(join(directory, 'packages', name), { recursive: true });
+      writeFileSync(
+        join(directory, 'packages', name, 'package.json'),
+        JSON.stringify({ name: `@sentry/${name}` }),
+      );
+    }
+    writeFileSync(
+      join(directory, '.craft.yml'),
+      [
+        `minVersion: ${WORKSPACES_MIN_VERSION}`,
+        'github:',
+        '  owner: getsentry',
+        '  repo: sentry',
+        // Inherited top-level settings expand too.
+        "releaseBranchPrefix: '{{workspaceName}}/release'",
+        'workspaces:',
+        '  packages/*:',
+        '    statusProvider:',
+        '      name: github',
+        '      config:',
+        "        contexts: ['{{workspaceName}}-package-pack']",
+        '    artifactProvider:',
+        '      name: github',
+        '      config:',
+        '        artifacts:',
+        "          Package: ['{{packageSimpleName}}-tarball']",
+        '    targets:',
+        '      - name: github',
+        "        tagPrefix: '{{workspaceName}}@'",
+        '      - name: npm',
+        "        id: '{{packageName}} in {{workspace}}'",
+        // Target-level templates keep their own markers.
+        "        artifactTemplate: '{{simpleName}}-{{version}}.tgz'",
+      ].join('\n'),
+    );
+    process.chdir(directory);
+
+    setActiveWorkspace('packages/scraps');
+    const scraps = getConfiguration(true);
+    expect(scraps.releaseBranchPrefix).toBe('scraps/release');
+    expect(scraps.statusProvider?.config?.contexts).toEqual([
+      'scraps-package-pack',
+    ]);
+    expect(scraps.artifactProvider?.config?.artifacts).toEqual({
+      Package: ['sentry-scraps-tarball'],
+    });
+    expect(scraps.targets).toEqual([
+      { name: 'github', tagPrefix: 'scraps@' },
+      {
+        name: 'npm',
+        id: '@sentry/scraps in packages/scraps',
+        artifactTemplate: '{{simpleName}}-{{version}}.tgz',
+      },
+    ]);
+    expect(getGitTagPrefix()).toBe('scraps@');
+
+    setActiveWorkspace('packages/icons');
+    expect(getConfiguration(true).releaseBranchPrefix).toBe('icons/release');
+    expect(getGitTagPrefix()).toBe('icons@');
+  });
+
+  test('rejects package placeholders without a package name', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'craft-workspaces-'));
+    temporaryDirectories.push(directory);
+    mkdirSync(join(directory, 'packages', 'cli'), { recursive: true });
+    writeFileSync(
+      join(directory, '.craft.yml'),
+      [
+        `minVersion: ${WORKSPACES_MIN_VERSION}`,
+        'workspaces:',
+        '  packages/*:',
+        "    releaseBranchPrefix: '{{packageName}}/release'",
+      ].join('\n'),
+    );
+    process.chdir(directory);
+
+    setActiveWorkspace('packages/cli');
+    expect(() => getConfiguration(true)).toThrow(
+      'Workspace "packages/cli" uses {{packageName}}, but packages/cli/package.json could not be read',
+    );
+
+    writeFileSync(join(directory, 'packages', 'cli', 'package.json'), '{}');
+    expect(() => getConfiguration(true)).toThrow(
+      'packages/cli/package.json has no "name"',
+    );
   });
 
   test('expands remote configuration globs from the repository root', () => {
@@ -1008,5 +1246,153 @@ describe('workspaces', () => {
       owner: 'getsentry',
       repo: 'toolkit',
     });
+  });
+});
+
+describe('versioning.files', () => {
+  afterEach(() => {
+    setActiveWorkspace(undefined);
+  });
+
+  const withFiles = (...lines: string[]) =>
+    [
+      `minVersion: ${VERSION_FILES_MIN_VERSION}`,
+      'versioning:',
+      '  files:',
+      ...lines,
+    ].join('\n');
+
+  test('accepts json, frontmatter, and regex entries', () => {
+    const config = loadConfigurationFromString(
+      withFiles(
+        '    - path: packages/@sentry/mcp/package.json',
+        '    - path: plugin/plugin.json',
+        '      stripPrerelease: true',
+        '    - path: skills/**/*.md',
+        '    - path: sdk/_version.py',
+        '      format: regex',
+        `      pattern: '/__version__ = "([^"]+)"/'`,
+      ),
+    );
+
+    expect(config.versioning?.files).toHaveLength(4);
+  });
+
+  test.each([
+    ['an unknown format', ['    - path: VERSION'], /Cannot infer the format/],
+    [
+      'a regex without a pattern',
+      ['    - path: v.txt', '      format: regex'],
+      /Set "pattern" for, and only for, format: regex/,
+    ],
+    [
+      'a pattern without format: regex',
+      ['    - path: a.json', "      pattern: '/(x)/'"],
+      /Set "pattern" for, and only for, format: regex/,
+    ],
+    [
+      'a pattern without a capturing group',
+      ['    - path: v.txt', '      format: regex', "      pattern: '/x/'"],
+      /exactly one capturing group/,
+    ],
+    [
+      'a pattern with two capturing groups',
+      ['    - path: v.txt', '      format: regex', "      pattern: '/(x)(y)/'"],
+      /exactly one capturing group/,
+    ],
+    [
+      'a regex with a field',
+      [
+        '    - path: v.txt',
+        '      format: regex',
+        "      pattern: '/(x)/'",
+        '      field: version',
+      ],
+      /Only json, toml, yaml, frontmatter files support "field"/,
+    ],
+    [
+      'an unknown key',
+      ['    - path: a.json', '      strip_prerelease: true'],
+      /strip_prerelease/,
+    ],
+    [
+      'a path outside the repository',
+      ['    - path: ../mcp/package.json'],
+      /must be relative to the repository root/,
+    ],
+    [
+      'an absolute path',
+      ['    - path: /etc/package.json'],
+      /must be relative to the repository root/,
+    ],
+    [
+      'a brace alternative outside the repository',
+      ['    - path: "{packages,..}/package.json"'],
+      /must be relative to the repository root/,
+    ],
+  ])('rejects %s', (_name, lines, message) => {
+    expect(() => loadConfigurationFromString(withFiles(...lines))).toThrow(
+      message,
+    );
+  });
+
+  test.each([
+    ['package.json', 'json'],
+    ['Cargo.toml', 'toml'],
+    ['pubspec.yml', 'yaml'],
+    ['docs/SKILL.md', 'frontmatter'],
+    ['src/Sdk.csproj', 'msbuild'],
+    ['Directory.Build.props', 'msbuild'],
+    ['sdk.gemspec', 'gem'],
+    ['lib/sdk/version.rb', 'gem'],
+    ['mix.exs', 'mix'],
+  ])('infers the format of %s', (path, format) => {
+    expect(getVersionFileFormat({ path })).toBe(format);
+  });
+
+  test('requires a minVersion that supports it', () => {
+    expect(() =>
+      loadConfigurationFromString(
+        'minVersion: 3.6.0\nversioning:\n  files:\n    - path: a.json',
+      ),
+    ).toThrow(
+      `"versioning.files" requires minVersion >= ${VERSION_FILES_MIN_VERSION}`,
+    );
+  });
+
+  test.each([
+    ['a custom command', 'preReleaseCommand: bash bump.sh'],
+    ['a disabled command', "preReleaseCommand: ''"],
+  ])('cannot be combined with %s', (_name, preReleaseCommand) => {
+    expect(() =>
+      loadConfigurationFromString(
+        `${preReleaseCommand}\n${withFiles('    - path: a.json')}`,
+      ),
+    ).toThrow('"versioning.files" cannot be combined with "preReleaseCommand"');
+  });
+
+  test('rejects a workspace that inherits a preReleaseCommand', () => {
+    setActiveWorkspace('packages/cli');
+    expect(() =>
+      loadConfigurationFromString(
+        [
+          `minVersion: ${VERSION_FILES_MIN_VERSION}`,
+          'preReleaseCommand: bash bump.sh',
+          'workspaces:',
+          '  packages/cli:',
+          '    versioning:',
+          '      files:',
+          '        - path: packages/mcp/package.json',
+        ].join('\n'),
+      ),
+    ).toThrow('"versioning.files" cannot be combined with "preReleaseCommand"');
+  });
+
+  test('allows an empty list next to a preReleaseCommand', () => {
+    const config = loadConfigurationFromString(
+      'preReleaseCommand: bash bump.sh\nversioning:\n  files: []',
+    );
+
+    expect(config.versioning?.files).toEqual([]);
   });
 });
