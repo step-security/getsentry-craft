@@ -86,8 +86,7 @@ export class PubDevTarget extends BaseTarget {
       return undefined;
     }
     const pubspec = load(readFileSync(pubspecPath, 'utf-8')) as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     const version = pubspec?.version;
     return typeof version === 'string' ? version : undefined;
   }

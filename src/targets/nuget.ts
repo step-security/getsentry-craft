@@ -475,7 +475,7 @@ export class NugetTarget extends BaseTarget {
       headers: {
         Authorization: `Bearer ${oidcToken}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'getsentry/craft',
+        'User-Agent': 'step-security/getsentry-craft',
       },
       body: JSON.stringify({ username: user, tokenType: 'ApiKey' }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),

@@ -79,7 +79,7 @@ jobs:
   release:
     permissions:
       contents: write
-    uses: getsentry/craft/.github/workflows/release.yml@v2
+    uses: step-security/getsentry-craft@v3
     with:
       version: ${{ inputs.version }}
     secrets: inherit
@@ -87,10 +87,6 @@ jobs:
 
 See [GitHub Actions](https://craft.sentry.dev/github-actions/) for all inputs,
 the composite action, and the changelog preview workflow.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 ## License
 

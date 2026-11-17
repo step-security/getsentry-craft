@@ -9,10 +9,10 @@ The target calls the registry's HTTP API directly (the same endpoints [`mcp-publ
 
 ## Configuration
 
-| Option | Description |
-|--------|-------------|
-| `manifest` | Path to the `server.json` manifest, relative to the repository root (also inside a workspace). Default: `server.json` |
-| `registryUrl` | Registry base URL. Default: `https://registry.modelcontextprotocol.io` |
+| Option        | Description                                                                                                           |
+| ------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `manifest`    | Path to the `server.json` manifest, relative to the repository root (also inside a workspace). Default: `server.json` |
+| `registryUrl` | Registry base URL. Default: `https://registry.modelcontextprotocol.io`                                                |
 
 The server name comes from the manifest's `name`.
 
@@ -22,9 +22,9 @@ By default, the target uses GitHub Actions OIDC, so no secret is needed. The pub
 
 Without OIDC, the target exchanges a GitHub token for a registry token instead:
 
-| Name | Required | Description |
-|------|----------|-------------|
-| `MCP_GITHUB_TOKEN` | No | GitHub token whose user can publish to the server's `io.github.<owner>/*` namespace. Used only when GitHub Actions OIDC is not available. |
+| Name               | Required | Description                                                                                                                               |
+| ------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `MCP_GITHUB_TOKEN` | No       | GitHub token whose user can publish to the server's `io.github.<owner>/*` namespace. Used only when GitHub Actions OIDC is not available. |
 
 ## Default Behavior
 

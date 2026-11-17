@@ -11,7 +11,7 @@ Use release workspaces when one repository ships products on separate release
 cycles, such as a CLI at `1.4.0` and an MCP server at `0.3.0`.
 
 :::note[Release workspaces vs. package workspaces]
-Release workspaces are unrelated to npm, pnpm, Yarn, or .NET *package*
+Release workspaces are unrelated to npm, pnpm, Yarn, or .NET _package_
 workspaces.
 
 - **Package workspaces** (`workspaces: true` on the [npm](../targets/npm/#workspaces-support)
@@ -288,7 +288,7 @@ jobs:
   release:
     permissions:
       contents: write
-    uses: getsentry/craft/.github/workflows/release.yml@v2
+    uses: step-security/getsenty-craft@v3
     with:
       version: auto
       workspace: packages/cli

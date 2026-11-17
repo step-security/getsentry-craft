@@ -21,15 +21,15 @@ changelog:
     style: Concise and friendly for developers. # optional tone guidance
 ```
 
-| Setting | Default | Behavior |
-| --- | --- | --- |
-| `levels` | `[release]` | Select visible summaries; omitted or empty arrays use `[release]`. |
-| `minItems` | `5` | Strict entry-count threshold. `0` includes every nonempty selected group. Category counts include descendants; release counts include the whole changelog. |
-| `timeout` | `120` | Total generation budget in seconds: `0` for no total limit, otherwise at least `30`. Raise it for long changelogs, especially with `scope` and `category` levels; a run that runs out reports `reason=deadline` and keeps the original entries. |
-| `style` | Neutral | Optional writing guidance (1–500 characters), applied at every level. Facts, coverage, length and plain-text safeguards still apply. |
-| `llm.endpoint` | `https://api.githubcopilot.com/responses` | Full POST URL; HTTPS required except loopback HTTP. |
-| `llm.model` | `gpt-5.4-nano` | Model ID supported by the endpoint and credential. |
-| `llm.apiKeyEnv` | `GITHUB_TOKEN` | Name of the environment variable containing the token. Never put the token in configuration or CLI arguments. |
+| Setting         | Default                                   | Behavior                                                                                                                                                                                                                                        |
+| --------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `levels`        | `[release]`                               | Select visible summaries; omitted or empty arrays use `[release]`.                                                                                                                                                                              |
+| `minItems`      | `5`                                       | Strict entry-count threshold. `0` includes every nonempty selected group. Category counts include descendants; release counts include the whole changelog.                                                                                      |
+| `timeout`       | `120`                                     | Total generation budget in seconds: `0` for no total limit, otherwise at least `30`. Raise it for long changelogs, especially with `scope` and `category` levels; a run that runs out reports `reason=deadline` and keeps the original entries. |
+| `style`         | Neutral                                   | Optional writing guidance (1–500 characters), applied at every level. Facts, coverage, length and plain-text safeguards still apply.                                                                                                            |
+| `llm.endpoint`  | `https://api.githubcopilot.com/responses` | Full POST URL; HTTPS required except loopback HTTP.                                                                                                                                                                                             |
+| `llm.model`     | `gpt-5.4-nano`                            | Model ID supported by the endpoint and credential.                                                                                                                                                                                              |
+| `llm.apiKeyEnv` | `GITHUB_TOKEN`                            | Name of the environment variable containing the token. Never put the token in configuration or CLI arguments.                                                                                                                                   |
 
 For short changelogs, keep the default `levels: [release]` and `minItems: 5`
 to add an overview while leaving the original entries expanded. Selecting all
@@ -45,7 +45,9 @@ These examples use two original entries and `minItems: 0`.
 CLI authentication now supports signing in and out.
 
 ### New Features
+
 #### CLI
+
 - Add login command
 - Add logout command
 ```
@@ -67,7 +69,9 @@ Expanded CLI authentication workflows.
 
 ```markdown
 ### New Features
+
 #### CLI
+
 Added login and logout commands.
 
 - Add login command
@@ -80,7 +84,9 @@ Added login and logout commands.
 CLI authentication now supports signing in and out.
 
 ### New Features
+
 #### CLI
+
 Added login and logout commands.
 
 - Add login command

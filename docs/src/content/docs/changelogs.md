@@ -7,11 +7,11 @@ Craft keeps a Markdown changelog (`CHANGELOG.md` by default) and uses it for
 release notes, such as the body of a [GitHub release](../targets/github/). Pick
 a policy:
 
-| Policy | What Craft does on `craft prepare` |
-| --- | --- |
-| `none` (default) | Nothing. |
-| `simple` | Checks that the changelog has an entry for the new version. |
-| `auto` | Generates the entry from merged pull requests and commits. |
+| Policy           | What Craft does on `craft prepare`                          |
+| ---------------- | ----------------------------------------------------------- |
+| `none` (default) | Nothing.                                                    |
+| `simple`         | Checks that the changelog has an entry for the new version. |
+| `auto`           | Generates the entry from merged pull requests and commits.  |
 
 ## Policies
 
@@ -340,15 +340,15 @@ that touch the selected workspace. See
 
 ## Configuration options
 
-| Option                    | Description                                                                  |
-| ------------------------- | ---------------------------------------------------------------------------- |
-| `changelog`               | Path to changelog file (string) OR configuration object                      |
-| `changelog.filePath`      | Path to changelog file. Defaults to `<workspace>/CHANGELOG.md` for a directory workspace, otherwise `CHANGELOG.md`. Explicit paths take precedence. |
-| `changelog.policy`        | Mode: `none`, `simple`, or `auto`. Default: `none`                           |
-| `changelog.scopeGrouping` | Enable scope-based grouping. Default: `true`                                 |
-| `changelog.includePaths`  | Extra workspace directories to include in automatic changelogs. [Release workspaces](../workspaces/#workspace-aware-changelogs) only. Default: `[]` |
+| Option                    | Description                                                                                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `changelog`               | Path to changelog file (string) OR configuration object                                                                                                |
+| `changelog.filePath`      | Path to changelog file. Defaults to `<workspace>/CHANGELOG.md` for a directory workspace, otherwise `CHANGELOG.md`. Explicit paths take precedence.    |
+| `changelog.policy`        | Mode: `none`, `simple`, or `auto`. Default: `none`                                                                                                     |
+| `changelog.scopeGrouping` | Enable scope-based grouping. Default: `true`                                                                                                           |
+| `changelog.includePaths`  | Extra workspace directories to include in automatic changelogs. [Release workspaces](../workspaces/#workspace-aware-changelogs) only. Default: `[]`    |
 | `changelog.unownedPaths`  | `include`, `exclude`, or `own` files outside every workspace. [Release workspaces](../workspaces/#workspace-aware-changelogs) only. Default: `include` |
-| `changelog.aiSummary` | Opt-in release, category, and scope [AI summaries](../ai-summaries/). Default: disabled. |
+| `changelog.aiSummary`     | Opt-in release, category, and scope [AI summaries](../ai-summaries/). Default: disabled.                                                               |
 
 The legacy top-level `changelogPolicy` key still works but is deprecated; use
 `changelog.policy`.

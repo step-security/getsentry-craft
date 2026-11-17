@@ -139,7 +139,6 @@ export class GitHubArtifactProvider extends BaseArtifactProvider {
       // https://docs.github.com/en/rest/actions/artifacts#list-artifacts-for-a-repository
       // Filter by name server-side: listing all artifacts of a repository
       // with a large number of artifacts is slow and can fail with HTTP 500
-      // (see https://github.com/getsentry/craft/issues/879).
       const artifactResponse = await this.github.actions.listArtifactsForRepo({
         owner: owner,
         repo: repo,

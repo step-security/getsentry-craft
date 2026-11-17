@@ -18,13 +18,13 @@ version for you.
 Craft provides [standalone executables](https://github.com/getsentry/craft/releases/latest)
 with Node embedded. Choose the file matching your operating system and CPU:
 
-| Platform | Release file |
-| --- | --- |
+| Platform            | Release file            |
+| ------------------- | ----------------------- |
 | macOS Apple Silicon | `craft-darwin-arm64.gz` |
-| macOS Intel | `craft-darwin-x64.gz` |
-| Linux arm64 | `craft-linux-arm64.gz` |
-| Linux x64 | `craft-linux-x64.gz` |
-| Windows x64 | `craft-win-x64.exe` |
+| macOS Intel         | `craft-darwin-x64.gz`   |
+| Linux arm64         | `craft-linux-arm64.gz`  |
+| Linux x64           | `craft-linux-x64.gz`    |
+| Windows x64         | `craft-win-x64.exe`     |
 
 Native downloads are available starting with the first release containing these
 assets. Linux builds use glibc; Alpine/musl is not supported. macOS binaries are

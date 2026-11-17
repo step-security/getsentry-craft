@@ -207,7 +207,7 @@ export class GhPagesTarget extends BaseTarget {
    * rebuild when the build fails.
    *
    * A push to the branch only starts the build. GitHub can fail the build
-   * later, for example when its deploy job times out (getsentry/craft#960).
+   * later, for example when its deploy job times out.
    * Skips the wait when the token cannot read Pages, or when Pages does not
    * build from the configured branch.
    *

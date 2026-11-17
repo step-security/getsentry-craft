@@ -3,8 +3,8 @@ title: Versioning
 description: How Craft picks the next version and updates it in your project files
 ---
 
-Craft answers two questions on every release: *what is the next version?* and
-*where does that version need to be written?*
+Craft answers two questions on every release: _what is the next version?_ and
+_where does that version need to be written?_
 
 ## Version format
 
@@ -48,14 +48,14 @@ Add a build identifier for platform-specific releases:
 
 Pass the version to `craft prepare` in one of these forms:
 
-| Argument | Result |
-| --- | --- |
-| `1.2.3` | Release exactly this version. |
-| `major`, `minor`, `patch` | Increment the latest tag. |
-| `auto` | Pick the bump from the commits since the latest stable tag, using the `semver` field of each [changelog category](../changelogs/#craft-extensions-to-releaseyml). |
-| `pre` | Cut a prerelease of the version `auto` would release. |
-| `calver` | Compute a [calendar version](#calendar-versioning-calver). |
-| *(omitted)* | Use `versioning.policy`. |
+| Argument                  | Result                                                                                                                                                            |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `1.2.3`                   | Release exactly this version.                                                                                                                                     |
+| `major`, `minor`, `patch` | Increment the latest tag.                                                                                                                                         |
+| `auto`                    | Pick the bump from the commits since the latest stable tag, using the `semver` field of each [changelog category](../changelogs/#craft-extensions-to-releaseyml). |
+| `pre`                     | Cut a prerelease of the version `auto` would release.                                                                                                             |
+| `calver`                  | Compute a [calendar version](#calendar-versioning-calver).                                                                                                        |
+| _(omitted)_               | Use `versioning.policy`.                                                                                                                                          |
 
 Before the first tag, bump types and `auto` increment the version declared in
 the release unit's project files instead, so `1.0.0-dev.0` becomes `1.0.0`.
@@ -101,11 +101,11 @@ versioning:
   policy: auto # auto, manual, or calver
 ```
 
-| Policy   | Behavior |
-| -------- | -------- |
+| Policy   | Behavior                                                                               |
+| -------- | -------------------------------------------------------------------------------------- |
 | `auto`   | Analyze commits to determine the bump. Default when `minVersion` is `2.14.0` or later. |
-| `manual` | Require an explicit version argument. Default for older `minVersion` values. |
-| `calver` | Use calendar-based versioning. |
+| `manual` | Require an explicit version argument. Default for older `minVersion` values.           |
+| `calver` | Use calendar-based versioning.                                                         |
 
 To preview the bump Craft would choose, run `craft changelog --format json` or
 add the [changelog preview workflow](../github-actions/#changelog-preview) to
@@ -203,26 +203,26 @@ versioning:
 Craft picks the format from the file name, so it can update every kind of
 file its version-bumping targets update:
 
-| `format` | Inferred for | Updates |
-| --- | --- | --- |
-| `json` | `*.json` | The string at `field`. Default: `version`. |
-| `toml` | `*.toml` | The string at `field`. Default: `package.version` in `Cargo.toml`, `project.version` in `pyproject.toml`, otherwise `version`. |
-| `yaml` | `*.yaml`, `*.yml` | The value at `field`. Default: `version`. |
-| `frontmatter` | `*.md`, `*.mdx` | The value at `field` in the YAML frontmatter. Default: `version`. |
-| `msbuild` | `*.csproj`, `*.fsproj`, `*.vbproj`, `*.props`, `*.targets` | `<Version>`, `<VersionPrefix>`, `<PackageVersion>`, `<AssemblyVersion>`, and `<FileVersion>`, like the `nuget` target. Clears `<VersionSuffix>` when there's a `<VersionPrefix>`. |
-| `gem` | `*.gemspec`, `version.rb` | `spec.version = "…"` and `VERSION = "…"`, like the `gem` target. |
-| `mix` | `mix.exs` | `version: "…"` and `@version "…"`, like the `hex` target. |
-| `regex` | Never inferred | The capturing group of every match of `pattern`. |
+| `format`      | Inferred for                                               | Updates                                                                                                                                                                           |
+| ------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `json`        | `*.json`                                                   | The string at `field`. Default: `version`.                                                                                                                                        |
+| `toml`        | `*.toml`                                                   | The string at `field`. Default: `package.version` in `Cargo.toml`, `project.version` in `pyproject.toml`, otherwise `version`.                                                    |
+| `yaml`        | `*.yaml`, `*.yml`                                          | The value at `field`. Default: `version`.                                                                                                                                         |
+| `frontmatter` | `*.md`, `*.mdx`                                            | The value at `field` in the YAML frontmatter. Default: `version`.                                                                                                                 |
+| `msbuild`     | `*.csproj`, `*.fsproj`, `*.vbproj`, `*.props`, `*.targets` | `<Version>`, `<VersionPrefix>`, `<PackageVersion>`, `<AssemblyVersion>`, and `<FileVersion>`, like the `nuget` target. Clears `<VersionSuffix>` when there's a `<VersionPrefix>`. |
+| `gem`         | `*.gemspec`, `version.rb`                                  | `spec.version = "…"` and `VERSION = "…"`, like the `gem` target.                                                                                                                  |
+| `mix`         | `mix.exs`                                                  | `version: "…"` and `@version "…"`, like the `hex` target.                                                                                                                         |
+| `regex`       | Never inferred                                             | The capturing group of every match of `pattern`.                                                                                                                                  |
 
 Each entry accepts:
 
-| Option | Description |
-| --- | --- |
-| `path` | File or glob, relative to the repository root. Paths can't contain `..`, and matches that resolve outside the repository are ignored. |
-| `format` | One of the formats above. Required when Craft can't infer it from the path. |
-| `field` | For `json`, `toml`, `yaml`, and `frontmatter`: the dotted key path to update, such as `expo.version` or `tool.poetry.version`. |
-| `pattern` | For `regex` only: a `/source/flags` regular expression with exactly one capturing group, which Craft replaces with the version. |
-| `stripPrerelease` | Write only `major.minor.patch`, without prerelease or build metadata. Default: `false`. |
+| Option            | Description                                                                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`            | File or glob, relative to the repository root. Paths can't contain `..`, and matches that resolve outside the repository are ignored. |
+| `format`          | One of the formats above. Required when Craft can't infer it from the path.                                                           |
+| `field`           | For `json`, `toml`, `yaml`, and `frontmatter`: the dotted key path to update, such as `expo.version` or `tool.poetry.version`.        |
+| `pattern`         | For `regex` only: a `/source/flags` regular expression with exactly one capturing group, which Craft replaces with the version.       |
+| `stripPrerelease` | Write only `major.minor.patch`, without prerelease or build metadata. Default: `false`.                                               |
 
 Craft only changes the version value and leaves the rest of each file as it
 is. In TOML and YAML files, it needs exactly one value at `field`, and it
