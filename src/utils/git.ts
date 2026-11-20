@@ -6,10 +6,16 @@ import {
   type StatusResult,
 } from 'simple-git';
 
+import { realpathSync } from 'node:fs';
+import { load } from 'js-yaml';
+
 import {
   getActiveWorkspace,
   getChangelogConfig,
   getConfigFileDir,
+  getConfigFilePath,
+  getUnownedPathsOwner,
+  getWorkspaceConfigKey,
   getWorkspaceNames,
 } from '../config';
 import { ConfigurationError } from './errors';
@@ -19,6 +25,7 @@ import { logger } from '../logger';
 import { distance as levenshtein } from 'fastest-levenshtein';
 import path from 'node:path';
 import { discoverWorkspaces } from './workspaces';
+import { parseVersion, type SemVer } from './version';
 
 export interface GitChange {
   hash: string;
@@ -65,6 +72,81 @@ export async function getLatestTag(
   git: SimpleGit,
   tagPrefix = '',
 ): Promise<string> {
+  return findLatestTag(git, tagPrefix, () => true);
+}
+
+/**
+ * Returns the latest tag whose version is not a prerelease, or an empty string
+ * when there is none.
+ *
+ * The next release contains every change since the latest stable release,
+ * including those already in prereleases, so that release is the base for
+ * picking its version bump.
+ */
+export async function getLatestStableTag(
+  git: SimpleGit,
+  tagPrefix = '',
+): Promise<string> {
+  return findLatestTag(git, tagPrefix, tagVersion => !tagVersion.pre);
+}
+
+/**
+ * Returns the tag whose changes a release of `version` follows, or an empty
+ * string when there is none.
+ *
+ * A stable release follows the latest stable tag. A prerelease follows the
+ * latest prerelease of the same `major.minor.patch` (`2.0.0-alpha.3` follows
+ * `2.0.0-alpha.2`), or the latest stable tag when it starts a new series
+ * (`2.1.0-alpha.0` follows `2.0.4`, not `2.0.0-alpha.3`).
+ */
+export async function getChangelogBaseTag(
+  git: SimpleGit,
+  version: string,
+  tagPrefix = '',
+): Promise<string> {
+  const release = parseVersion(version);
+  return findLatestTag(
+    git,
+    tagPrefix,
+    tagVersion =>
+      !tagVersion.pre ||
+      (!!release?.pre &&
+        tagVersion.major === release.major &&
+        tagVersion.minor === release.minor &&
+        tagVersion.patch === release.patch),
+  );
+}
+
+/**
+ * Returns the latest tag whose version `accept` accepts.
+ *
+ * Tags without a version after the prefix, such as floating tags (`v2`) or
+ * `latest`, are never release tags, so they are skipped.
+ */
+async function findLatestTag(
+  git: SimpleGit,
+  tagPrefix: string,
+  accept: (tagVersion: SemVer) => boolean,
+): Promise<string> {
+  const skippedTags: string[] = [];
+  for (;;) {
+    const tag = await describeLatestTag(git, tagPrefix, skippedTags);
+    if (!tag) {
+      return tag;
+    }
+    const tagVersion = parseVersion(tag.slice(tagPrefix.length));
+    if (tagVersion && accept(tagVersion)) {
+      return tag;
+    }
+    skippedTags.push(tag);
+  }
+}
+
+async function describeLatestTag(
+  git: SimpleGit,
+  tagPrefix: string,
+  excludedTags: string[],
+): Promise<string> {
   try {
     // This part is courtesy of https://stackoverflow.com/a/7261049/90297
     const args = ['describe', '--tags', '--abbrev=0'];
@@ -75,12 +157,16 @@ export async function getLatestTag(
       // is resolved per-product instead of picking whatever is newest overall.
       args.push('--match', `${tagPrefix}*`);
     }
+    for (const tag of excludedTags) {
+      args.push('--exclude', tag);
+    }
     return (await git.raw(args)).trim();
   } catch (err) {
     // If there are no tags, return an empty string
     if (
       err instanceof Error &&
       (err.message.startsWith('fatal: No names found') ||
+        err.message.startsWith('fatal: No tags can describe') ||
         err.message.startsWith('Nothing to describe'))
     ) {
       return '';
@@ -110,43 +196,51 @@ export async function getChangesSince(
     file: '.',
   };
 
+  const workspace = getActiveWorkspace();
+  // A workspace's first release has no previous tag. Its history cannot
+  // predate the workspace's Craft configuration, so start there instead of
+  // reading the entire repository history.
+  let since = rev;
+  const introduction =
+    !rev && workspace
+      ? await findWorkspaceIntroduction(git, workspace, until)
+      : undefined;
+  if (introduction && (await hasParent(git, introduction))) {
+    since = `${introduction}^`;
+  }
+
   // simple-git interprets `to` without `from` as HEAD..HEAD and returns no
-  // commits. A first release has no previous tag, so log the full history.
-  const { all: commits } = rev
-    ? await git.log({ ...gitLogArgs, from: rev })
+  // commits. Without a starting point, log the full history.
+  const { all: commits } = since
+    ? await git.log({ ...gitLogArgs, from: since })
     : await git.log(['--no-merges', until || 'HEAD', '--', '.']);
+  if (!rev) {
+    if (since) {
+      logger.info(
+        `No previous release tag found; reading ${commits.length} commits since ` +
+          `workspace "${workspace}" was added to the Craft configuration in ` +
+          `${introduction?.slice(0, 12)}.`,
+      );
+    } else {
+      logger.warn(
+        'No previous release tag found; reading the full history ' +
+          `(${commits.length} commits) for the changelog.`,
+      );
+    }
+  }
   const changes = commits.map(commit => ({
     hash: commit.hash,
     title: commit.message,
     body: commit.body,
     pr: commit.message.match(PRExtractor)?.[0] || null,
   }));
-  const workspace = getActiveWorkspace();
-  if (!workspace || changes.length === 0) {
+  if (changes.length === 0) {
     return changes;
   }
-
-  const root = getConfigFileDir() || process.cwd();
-  const discovered = await discoverWorkspaces(root);
-  const ownedPaths = new Set(getWorkspaceNames());
-  for (const pkg of discovered.packages) {
-    const relative = path
-      .relative(root, pkg.location)
-      .split(path.sep)
-      .join('/');
-    if (relative === '' || relative === '..' || relative.startsWith('../')) {
-      throw new ConfigurationError(
-        `Workspace package is outside the repository: ${pkg.name}`,
-      );
-    }
-    ownedPaths.add(relative);
+  const belongsToWorkspace = await getWorkspaceChangeFilter();
+  if (!belongsToWorkspace) {
+    return changes;
   }
-  const orderedOwners = [...ownedPaths].sort(
-    (left, right) => right.length - left.length,
-  );
-  const { includePaths } = getChangelogConfig();
-  const contains = (directory: string, file: string) =>
-    file === directory || file.startsWith(`${directory}/`);
 
   // NUL-delimited filenames remain unambiguous even when they contain spaces
   // or newlines. Disabling renames includes both sides of a moved file.
@@ -158,7 +252,7 @@ export async function getChangesSince(
     '--name-only',
     '-z',
     '--end-of-options',
-    rev ? `${rev}..${until || 'HEAD'}` : until || 'HEAD',
+    since ? `${since}..${until || 'HEAD'}` : until || 'HEAD',
     '--',
     '.',
   ]);
@@ -182,14 +276,141 @@ export async function getChangesSince(
     if (!files) {
       throw new Error(`Missing changelog paths for commit ${commit.hash}`);
     }
-    return files.some(file => {
+    return belongsToWorkspace(files);
+  });
+}
+
+/**
+ * Returns a predicate that tells whether a change touching the given
+ * repository-relative files belongs in the active workspace's changelog, or
+ * `undefined` when no workspace is selected.
+ *
+ * A file belongs to the workspace when it is under one of the workspace's
+ * `changelog.includePaths`, when the workspace is its closest owner (a
+ * workspace or discovered package directory), or when no workspace owns it
+ * and the `changelog.unownedPaths` rules give unowned files to this workspace.
+ */
+export async function getWorkspaceChangeFilter(): Promise<
+  ((files: string[]) => boolean) | undefined
+> {
+  const workspace = getActiveWorkspace();
+  if (!workspace) {
+    return undefined;
+  }
+
+  const root = getConfigFileDir() || process.cwd();
+  const discovered = await discoverWorkspaces(root);
+  const ownedPaths = new Set(getWorkspaceNames());
+  for (const pkg of discovered.packages) {
+    const relative = path
+      .relative(root, pkg.location)
+      .split(path.sep)
+      .join('/');
+    if (relative === '' || relative === '..' || relative.startsWith('../')) {
+      throw new ConfigurationError(
+        `Workspace package is outside the repository: ${pkg.name}`,
+      );
+    }
+    ownedPaths.add(relative);
+  }
+  const orderedOwners = [...ownedPaths].sort(
+    (left, right) => right.length - left.length,
+  );
+  const { includePaths, unownedPaths } = getChangelogConfig();
+  const unownedPathsOwner = getUnownedPathsOwner();
+  // Files outside every workspace belong to the configured owner. Without one,
+  // they are shared unless this workspace excludes them.
+  const includesUnowned = unownedPathsOwner
+    ? unownedPathsOwner === workspace
+    : unownedPaths !== 'exclude';
+  const contains = (directory: string, file: string) =>
+    file === directory || file.startsWith(`${directory}/`);
+
+  return files =>
+    files.some(file => {
       if (includePaths.some(directory => contains(directory, file))) {
         return true;
       }
       const owner = orderedOwners.find(directory => contains(directory, file));
-      return owner === undefined || owner === workspace;
+      return owner === undefined ? includesUnowned : owner === workspace;
     });
-  });
+}
+
+/**
+ * Finds the commit that added a workspace to the Craft configuration file.
+ *
+ * Walks the configuration file's history from `until` backwards and returns
+ * the oldest commit of the latest uninterrupted run that defines the
+ * workspace's key.
+ */
+async function findWorkspaceIntroduction(
+  git: SimpleGit,
+  workspace: string,
+  until?: string,
+): Promise<string | undefined> {
+  const key = getWorkspaceConfigKey(workspace);
+  if (!key) {
+    return undefined;
+  }
+  const top = (await git.revparse(['--show-toplevel'])).trim();
+  const configPath = path
+    .relative(realpathSync(top), realpathSync(getConfigFilePath()))
+    .split(path.sep)
+    .join('/');
+  const hashes = (
+    await git.raw([
+      'log',
+      '--format=%H',
+      '--end-of-options',
+      until || 'HEAD',
+      '--',
+      `:(top)${configPath}`,
+    ])
+  )
+    .split('\n')
+    .filter(Boolean);
+
+  let introduction: string | undefined;
+  for (const hash of hashes) {
+    if (!(await definesWorkspace(git, `${hash}:${configPath}`, key))) {
+      break;
+    }
+    introduction = hash;
+  }
+  return introduction;
+}
+
+async function definesWorkspace(
+  git: SimpleGit,
+  object: string,
+  key: string,
+): Promise<boolean> {
+  try {
+    const config = load(await git.show([object])) as {
+      workspaces?: unknown;
+    } | null;
+    const workspaces = config?.workspaces;
+    return (
+      typeof workspaces === 'object' &&
+      workspaces !== null &&
+      Object.prototype.hasOwnProperty.call(workspaces, key)
+    );
+  } catch {
+    // Unreadable or invalid historical configuration ends the search.
+    return false;
+  }
+}
+
+async function hasParent(git: SimpleGit, commit: string): Promise<boolean> {
+  const parents = await git.raw([
+    'rev-list',
+    '--parents',
+    '-n',
+    '1',
+    '--end-of-options',
+    commit,
+  ]);
+  return parents.trim().split(' ').length > 1;
 }
 
 export function stripRemoteName(

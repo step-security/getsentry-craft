@@ -5,7 +5,7 @@ import { globSync, hasMagic } from 'glob';
 import { load } from 'js-yaml';
 import GitUrlParse from 'git-url-parse';
 import { createGitClient } from './utils/git';
-import { ZodError } from 'zod';
+import { safeParse, type BaseIssue } from 'valibot';
 
 import { logger } from './logger';
 import {
@@ -19,6 +19,7 @@ import {
   VersioningPolicy,
   Workspace,
   type AiSummaryConfig,
+  type UnownedPathsPolicy,
 } from './schemas/project_config';
 import { ConfigurationError } from './utils/errors';
 import { isCompiledGitHubAction } from './utils/detection';
@@ -50,9 +51,12 @@ export const CONFIG_FILE_NAME = '.craft.yml';
 export const DEFAULT_RELEASE_BRANCH_NAME = 'release';
 
 /**
- * Cached path to the configuration file
+ * Cached path to the configuration file, and the working directory it was
+ * found from. A dry run moves into a temporary worktree, which must resolve
+ * its own configuration file rather than the original checkout's.
  */
 let _configPathCache: string;
+let _configPathCacheCwd: string | undefined;
 
 /**
  * Cached configuration
@@ -67,6 +71,9 @@ let _configCache: CraftProjectConfig;
  * `checkMinimalConfigVersion`.
  */
 export const WORKSPACES_MIN_VERSION = '2.29.0';
+
+/** Minimum craft version required for `versioning.files`. */
+export const VERSION_FILES_MIN_VERSION = '3.8.0';
 
 /**
  * The name of the currently-selected workspace, or undefined for the default
@@ -109,6 +116,9 @@ export function getActiveWorkspace(): string | undefined {
  * - `github` is shallow-merged (owner/repo) so a workspace can override either
  *   value while inheriting the other.
  * - `minVersion` and `workspaces` themselves are stripped from the result.
+ * - Workspace placeholders (see `WORKSPACE_PLACEHOLDERS`) in any string
+ *   setting expand for the selected workspace, so one glob key can give each
+ *   matched directory its own tags, branches, and artifact names.
  */
 function resolveWorkspaceConfig(
   base: CraftProjectConfig,
@@ -163,7 +173,104 @@ function resolveWorkspaceConfig(
     }
   }
 
-  return resolved;
+  return expandWorkspacePlaceholders(
+    resolved,
+    getWorkspacePlaceholderResolver(workspaceName, workspaceDirectory),
+  );
+}
+
+/**
+ * Placeholders that expand to the selected workspace in its settings. Other
+ * `{{...}}` markers, such as the npm target's `{{name}}`, `{{simpleName}}`,
+ * and `{{version}}` artifact template fields, stay untouched.
+ */
+const WORKSPACE_PLACEHOLDERS = [
+  'workspace',
+  'workspaceName',
+  'packageName',
+  'packageSimpleName',
+] as const;
+
+type WorkspacePlaceholder = (typeof WORKSPACE_PLACEHOLDERS)[number];
+
+const WORKSPACE_PLACEHOLDER_REGEX = new RegExp(
+  `\\{\\{(${WORKSPACE_PLACEHOLDERS.join('|')})\\}\\}`,
+  'g',
+);
+
+function getWorkspacePlaceholderResolver(
+  workspaceName: string,
+  workspaceDirectory: string,
+): (placeholder: WorkspacePlaceholder) => string {
+  let packageName: string | undefined;
+  const readPackageName = (placeholder: WorkspacePlaceholder): string => {
+    if (packageName !== undefined) {
+      return packageName;
+    }
+    const packageJsonPath = path.posix.join(workspaceName, 'package.json');
+    let name: unknown;
+    try {
+      name = JSON.parse(
+        readFileSync(path.join(workspaceDirectory, packageJsonPath), 'utf-8'),
+      )?.name;
+    } catch (error) {
+      throw new ConfigurationError(
+        `Workspace "${workspaceName}" uses {{${placeholder}}}, but ` +
+          `${packageJsonPath} could not be read: ${(error as Error).message}`,
+      );
+    }
+    if (typeof name !== 'string' || name === '') {
+      throw new ConfigurationError(
+        `Workspace "${workspaceName}" uses {{${placeholder}}}, but ` +
+          `${packageJsonPath} has no "name".`,
+      );
+    }
+    packageName = name;
+    return name;
+  };
+
+  return placeholder => {
+    switch (placeholder) {
+      case 'workspace':
+        return workspaceName;
+      case 'workspaceName':
+        return path.posix.basename(workspaceName);
+      case 'packageName':
+        return readPackageName(placeholder);
+      case 'packageSimpleName':
+        return readPackageName(placeholder)
+          .replace(/^@/, '')
+          .replace(/\//g, '-');
+    }
+  };
+}
+
+function expandWorkspacePlaceholders<T>(
+  value: T,
+  resolve: (placeholder: WorkspacePlaceholder) => string,
+): T {
+  if (typeof value === 'string') {
+    return value.replace(WORKSPACE_PLACEHOLDER_REGEX, (_match, placeholder) =>
+      resolve(placeholder as WorkspacePlaceholder),
+    ) as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => expandWorkspacePlaceholders(item, resolve)) as T;
+  }
+  // Only plain objects: YAML may also produce values such as Dates.
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    Object.getPrototypeOf(value) === Object.prototype
+  ) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        expandWorkspacePlaceholders(item, resolve),
+      ]),
+    ) as T;
+  }
+  return value;
 }
 
 function getWorkspaceConfig(
@@ -307,6 +414,29 @@ function isSafeWorkspaceGlob(name: string): boolean {
   );
 }
 
+/**
+ * Checks that a `versioning.files` path or glob stays inside the repository.
+ * Unlike workspace paths, segments may use any character, such as the `@` in
+ * `packages/@scope/pkg/package.json`, since these paths are only matched
+ * against files.
+ */
+function isSafeVersionFilePath(name: string): boolean {
+  const alternatives = expandBraceAlternatives(name);
+  return (
+    !path.isAbsolute(name) &&
+    !name.includes('\\') &&
+    alternatives !== undefined &&
+    alternatives.length > 0 &&
+    alternatives.every(expanded =>
+      expanded
+        .split('/')
+        .every(
+          segment => segment !== '' && segment !== '.' && segment !== '..',
+        ),
+    )
+  );
+}
+
 function isSafeWorkspaceGlobSegment(segment: string): boolean {
   if (
     segment === '' ||
@@ -433,6 +563,39 @@ function checkWorkspacesMinVersion(config: CraftProjectConfig): void {
 }
 
 /**
+ * Validates `versioning.files` on the config of the selected release unit,
+ * after workspace inheritance, so a workspace cannot pick up files and a
+ * `preReleaseCommand` from different levels.
+ */
+function checkVersionFiles(config: CraftProjectConfig): void {
+  const files = config.versioning?.files;
+  if (!files?.length) {
+    return;
+  }
+  if (config.preReleaseCommand !== undefined) {
+    throw new ConfigurationError(
+      '"versioning.files" cannot be combined with "preReleaseCommand": the ' +
+        'files are only updated by automatic version bumping, which a ' +
+        'pre-release command replaces. Remove one of them.',
+    );
+  }
+  if (!isVersionGteMinVersion(config.minVersion, VERSION_FILES_MIN_VERSION)) {
+    throw new ConfigurationError(
+      `Using "versioning.files" requires minVersion >= ` +
+        `${VERSION_FILES_MIN_VERSION} in the configuration file.`,
+    );
+  }
+  for (const file of files) {
+    if (!isSafeVersionFilePath(file.path)) {
+      throw new ConfigurationError(
+        `versioning.files path "${file.path}" must be relative to the ` +
+          'repository root, without "." or ".." segments.',
+      );
+    }
+  }
+}
+
+/**
  * SemVer build metadata does not affect precedence, but the comparison helper
  * intentionally rejects versions carrying it. Strip it before compatibility
  * checks so config values such as `2.29.0+linux` remain valid.
@@ -496,12 +659,17 @@ function applyWorkspaceSelection(
  * Returns "undefined" if no file was found.
  */
 export function findConfigFile(): string | undefined {
-  if (_configPathCache && existsSync(_configPathCache)) {
+  const cwd = process.cwd();
+  if (
+    _configPathCache &&
+    _configPathCacheCwd === cwd &&
+    existsSync(_configPathCache)
+  ) {
     return _configPathCache;
   }
   _configPathCache = undefined as unknown as string;
+  _configPathCacheCwd = cwd;
 
-  const cwd = process.cwd();
   const MAX_DEPTH = 1024;
   let depth = 0;
   let currentDir = cwd;
@@ -552,6 +720,27 @@ export function getConfigFileDir(): string | undefined {
 }
 
 /**
+ * Valibot reports a failed union once at the union's path and keeps each
+ * option's issues, relative to that path, under `issue.issues`. Report the
+ * nested field issues instead so users see which setting is wrong.
+ */
+function formatIssues(
+  issues: readonly BaseIssue<unknown>[],
+  prefix: string[] = [],
+): string[] {
+  return issues.flatMap(issue => {
+    const path = [
+      ...prefix,
+      ...(issue.path ?? []).map(item => String(item.key)),
+    ];
+    const nested = issue.issues?.filter(child => child.path?.length);
+    return nested?.length
+      ? formatIssues(nested, path)
+      : [`${path.join('.')}: ${issue.message}`];
+  });
+}
+
+/**
  * Parses and validate passed configuration object
  *
  * Throw an error is the object cannot be properly parsed as configuration.
@@ -562,19 +751,14 @@ export function validateConfiguration(
   rawConfig: Record<string, any>,
 ): CraftProjectConfig {
   logger.debug('Parsing and validating the configuration file...');
-  try {
-    return CraftProjectConfigSchema.parse(rawConfig);
-  } catch (error) {
-    if (error instanceof ZodError) {
-      const messages = error.errors
-        .map(e => `${e.path.join('.')}: ${e.message}`)
-        .join('\n');
-      throw new ConfigurationError(
-        `Cannot parse configuration file:\n${messages}`,
-      );
-    }
-    throw error;
+  const result = safeParse(CraftProjectConfigSchema, rawConfig);
+  if (!result.success) {
+    const messages = formatIssues(result.issues).join('\n');
+    throw new ConfigurationError(
+      `Cannot parse configuration file:\n${messages}`,
+    );
   }
+  return result.output;
 }
 
 /**
@@ -593,7 +777,9 @@ export function getConfiguration(clearCache = false): CraftProjectConfig {
   >;
   const parsed = validateConfiguration(rawConfig);
   checkMinimalConfigVersion(parsed);
-  _configCache = applyWorkspaceSelection(parsed, path.dirname(configPath));
+  const resolved = applyWorkspaceSelection(parsed, path.dirname(configPath));
+  checkVersionFiles(resolved);
+  _configCache = resolved;
   return _configCache;
 }
 
@@ -612,7 +798,9 @@ export function loadConfigurationFromString(
   const rawConfig = load(configContent) as Record<string, any>;
   const parsed = validateConfiguration(rawConfig);
   checkMinimalConfigVersion(parsed);
-  _configCache = applyWorkspaceSelection(parsed, workspaceDirectory);
+  const resolved = applyWorkspaceSelection(parsed, workspaceDirectory);
+  checkVersionFiles(resolved);
+  _configCache = resolved;
   return _configCache;
 }
 
@@ -622,21 +810,71 @@ export function loadConfigurationFromString(
  * file, allowing external controllers to discover valid release paths.
  */
 export function getWorkspaceNames(): string[] {
+  const { config, directory } = loadUnselectedConfiguration();
+  const workspaceNames = getWorkspaceNamesFromConfig(config, directory);
+  if (workspaceNames.length > 0) {
+    checkWorkspacesMinVersion(config);
+  }
+  return workspaceNames;
+}
+
+/**
+ * Returns the `.craft.yml` key that defines a workspace: the name itself, or
+ * the glob pattern it expands from.
+ */
+export function getWorkspaceConfigKey(
+  workspaceName: string,
+): string | undefined {
+  const { config, directory } = loadUnselectedConfiguration();
+  return Object.keys(config.workspaces || {}).find(key =>
+    workspaceKeyMatches(key, workspaceName, directory),
+  );
+}
+
+/**
+ * Returns the workspace that owns files outside every workspace
+ * (`changelog.unownedPaths: own`), if one is configured.
+ */
+export function getUnownedPathsOwner(): string | undefined {
+  const { config, directory } = loadUnselectedConfiguration();
+  const owners: string[] = [];
+  for (const [key, workspace] of Object.entries(config.workspaces || {})) {
+    // Workspaces without their own changelog block inherit the top-level one.
+    const changelog = workspace.changelog ?? config.changelog;
+    if (typeof changelog !== 'object' || changelog.unownedPaths !== 'own') {
+      continue;
+    }
+    owners.push(
+      ...(isWorkspacePattern(key)
+        ? getWorkspaceGlobMatches(key, directory)
+        : [key]),
+    );
+  }
+  if (owners.length > 1) {
+    throw new ConfigurationError(
+      'Only one workspace can set changelog.unownedPaths to "own". ' +
+        `Found: ${owners.join(', ')}.`,
+    );
+  }
+  return owners[0];
+}
+
+/**
+ * Reads and validates the configuration file without applying the active
+ * workspace selection.
+ */
+function loadUnselectedConfiguration(): {
+  config: CraftProjectConfig;
+  directory: string;
+} {
   const configPath = getConfigFilePath();
   const rawConfig = load(readFileSync(configPath, 'utf-8')) as Record<
     string,
     any
   >;
-  const parsed = validateConfiguration(rawConfig);
-  checkMinimalConfigVersion(parsed);
-  const workspaceNames = getWorkspaceNamesFromConfig(
-    parsed,
-    path.dirname(configPath),
-  );
-  if (workspaceNames.length > 0) {
-    checkWorkspacesMinVersion(parsed);
-  }
-  return workspaceNames;
+  const config = validateConfiguration(rawConfig);
+  checkMinimalConfigVersion(config);
+  return { config, directory: path.dirname(configPath) };
 }
 
 /**
@@ -903,16 +1141,23 @@ export interface NormalizedChangelogConfig {
   scopeGrouping: boolean;
   /** Additional workspace paths to include in automatic changelogs */
   includePaths: string[];
+  /** How automatic changelogs treat files outside every workspace */
+  unownedPaths: UnownedPathsPolicy;
   /** Optional summaries; omitted unless configured explicitly. */
   aiSummary?: AiSummaryConfig | false;
 }
 
 const DEFAULT_CHANGELOG_FILE_PATH = 'CHANGELOG.md';
 
-function getDefaultChangelogFilePath(): string {
+/**
+ * Returns the selected workspace's path relative to the configuration file,
+ * or undefined when no workspace is selected or the workspace is not a
+ * directory (an alias such as `cli`).
+ */
+function getActiveWorkspaceDirectory(): string | undefined {
   const workspace = getActiveWorkspace();
   if (!workspace) {
-    return DEFAULT_CHANGELOG_FILE_PATH;
+    return undefined;
   }
 
   if (!isSafeWorkspacePath(workspace)) {
@@ -922,7 +1167,7 @@ function getDefaultChangelogFilePath(): string {
   const root = getConfigFileDir() || process.cwd();
   const directory = path.resolve(root, workspace);
   if (!existsSync(directory) || !lstatSync(directory).isDirectory()) {
-    return DEFAULT_CHANGELOG_FILE_PATH;
+    return undefined;
   }
 
   const realRoot = realpathSync(root);
@@ -933,7 +1178,30 @@ function getDefaultChangelogFilePath(): string {
     );
   }
 
-  return path.posix.join(workspace, DEFAULT_CHANGELOG_FILE_PATH);
+  return workspace;
+}
+
+/**
+ * Returns the directory that holds the selected release unit's project files:
+ * the selected workspace's directory, or the configuration file's directory
+ * when no directory workspace is selected.
+ *
+ * Automatic version bumps read project files (e.g. `package.json`,
+ * `pnpm-workspace.yaml`) from here, and NuGet workspace expansion keeps only
+ * projects inside it, so a workspace release only touches that workspace's
+ * packages.
+ */
+export function getReleaseUnitDir(): string {
+  const root = getConfigFileDir() || process.cwd();
+  const workspaceDirectory = getActiveWorkspaceDirectory();
+  return workspaceDirectory ? path.resolve(root, workspaceDirectory) : root;
+}
+
+function getDefaultChangelogFilePath(): string {
+  const workspaceDirectory = getActiveWorkspaceDirectory();
+  return workspaceDirectory
+    ? path.posix.join(workspaceDirectory, DEFAULT_CHANGELOG_FILE_PATH)
+    : DEFAULT_CHANGELOG_FILE_PATH;
 }
 
 /**
@@ -950,6 +1218,7 @@ export function getChangelogConfig(): NormalizedChangelogConfig {
   let policy = ChangelogPolicy.None;
   let scopeGrouping = true;
   let includePaths: string[] = [];
+  let unownedPaths: UnownedPathsPolicy = 'include';
 
   // Handle legacy changelogPolicy (deprecated)
   if (config.changelogPolicy !== undefined) {
@@ -978,6 +1247,9 @@ export function getChangelogConfig(): NormalizedChangelogConfig {
       if (config.changelog.includePaths !== undefined) {
         includePaths = config.changelog.includePaths;
       }
+      if (config.changelog.unownedPaths !== undefined) {
+        unownedPaths = config.changelog.unownedPaths;
+      }
     }
   }
 
@@ -986,6 +1258,7 @@ export function getChangelogConfig(): NormalizedChangelogConfig {
     policy,
     scopeGrouping,
     includePaths,
+    unownedPaths,
     aiSummary:
       typeof config.changelog === 'object'
         ? config.changelog.aiSummary
@@ -1052,7 +1325,11 @@ export function getNoMergeConfig(): NoMergeConfig {
  * Type for target classes that support expansion
  */
 interface ExpandableTargetClass {
-  expand(config: TargetConfig, rootDir: string): Promise<TargetConfig[]>;
+  expand(
+    config: TargetConfig,
+    rootDir: string,
+    releaseUnitDir: string,
+  ): Promise<TargetConfig[]>;
 }
 
 /**
@@ -1086,13 +1363,18 @@ export async function expandWorkspaceTargets(
   const { getTargetByName } = require('./targets');
 
   const rootDir = getConfigFileDir() || process.cwd();
+  const releaseUnitDir = getReleaseUnitDir();
   const expandedTargets: TargetConfig[] = [];
 
   for (const target of targets) {
     const targetClass = getTargetByName(target.name);
 
     if (targetClass && isExpandableTarget(targetClass)) {
-      const expanded = await targetClass.expand(target, rootDir);
+      const expanded = await targetClass.expand(
+        target,
+        rootDir,
+        releaseUnitDir,
+      );
       expandedTargets.push(...expanded);
     } else {
       expandedTargets.push(target);

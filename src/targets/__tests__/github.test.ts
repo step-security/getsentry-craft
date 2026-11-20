@@ -278,6 +278,41 @@ describe('GitHubTarget', () => {
     });
   });
 
+  describe('updateFloatingTags', () => {
+    let updateRef: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      githubTarget = new GitHubTarget(
+        { name: 'github', floatingTags: ['v{major}', 'v{major}.{minor}'] },
+        new NoneArtifactProvider(),
+        { owner: 'testOwner', repo: 'testRepo' },
+      );
+      updateRef = vi.fn().mockResolvedValue({});
+      githubTarget.github.rest.git.updateRef = updateRef as any;
+    });
+
+    it('moves floating tags to a stable release', async () => {
+      await (githubTarget as any).updateFloatingTags('0.53.0', 'abc123');
+
+      expect(updateRef).toHaveBeenCalledTimes(2);
+      expect(updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v0', sha: 'abc123', force: true }),
+      );
+      expect(updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v0.53', sha: 'abc123' }),
+      );
+    });
+
+    it('leaves floating tags alone for a prerelease', async () => {
+      await (githubTarget as any).updateFloatingTags(
+        '0.54.0-alpha.0',
+        'abc123',
+      );
+
+      expect(updateRef).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getRelease', () => {
     it('returns release data on success', async () => {
       const mockRelease = {
@@ -363,6 +398,86 @@ describe('GitHubTarget', () => {
         },
       });
       githubTarget.github.repos.createRelease = createReleaseSpy as any;
+    });
+
+    describe('release name', () => {
+      const createPrefixedTarget = () =>
+        new GitHubTarget(
+          { name: 'github', tagPrefix: 'cli@' },
+          new NoneArtifactProvider(),
+          { owner: 'testOwner', repo: 'testRepo' },
+        );
+
+      it('prefixes the changelog version in a release workspace', async () => {
+        const target = createPrefixedTarget();
+        target.github.repos.createRelease = createReleaseSpy as any;
+        setActiveWorkspace('packages/cli');
+
+        await target.createDraftRelease('0.2.0', 'abc123', {
+          name: '0.2.0',
+          body: 'notes',
+        });
+
+        expect(createReleaseSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'cli@0.2.0', tag_name: 'cli@0.2.0' }),
+        );
+      });
+
+      it('keeps text after the version in a release workspace', async () => {
+        const target = createPrefixedTarget();
+        target.github.repos.createRelease = createReleaseSpy as any;
+        setActiveWorkspace('packages/cli');
+
+        await target.createDraftRelease('0.2.0', 'abc123', {
+          name: '0.2.0 - Hotfix',
+          body: 'notes',
+        });
+
+        expect(createReleaseSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'cli@0.2.0 - Hotfix' }),
+        );
+      });
+
+      it('keeps headings that do not start with the version', async () => {
+        const target = createPrefixedTarget();
+        target.github.repos.createRelease = createReleaseSpy as any;
+        setActiveWorkspace('packages/cli');
+
+        await target.createDraftRelease('0.2.0', 'abc123', {
+          name: 'Spring Release',
+          body: 'notes',
+        });
+
+        expect(createReleaseSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'Spring Release' }),
+        );
+      });
+
+      it('keeps the changelog heading outside release workspaces', async () => {
+        const target = createPrefixedTarget();
+        target.github.repos.createRelease = createReleaseSpy as any;
+
+        await target.createDraftRelease('0.2.0', 'abc123', {
+          name: '0.2.0',
+          body: 'notes',
+        });
+
+        expect(createReleaseSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ name: '0.2.0', tag_name: 'cli@0.2.0' }),
+        );
+      });
+
+      it('falls back to the tag without a changeset', async () => {
+        const target = createPrefixedTarget();
+        target.github.repos.createRelease = createReleaseSpy as any;
+        setActiveWorkspace('packages/cli');
+
+        await target.createDraftRelease('0.2.0', 'abc123');
+
+        expect(createReleaseSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'cli@0.2.0' }),
+        );
+      });
     });
 
     it('passes short body through unchanged', async () => {

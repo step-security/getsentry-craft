@@ -7,7 +7,7 @@ import { vi, type Mock, type MockedFunction } from 'vitest';
 vi.mock('../githubApi.ts');
 import { getGitHubClient } from '../githubApi';
 vi.mock('../git');
-import { getChangesSince } from '../git';
+import { getChangesSince, getWorkspaceChangeFilter } from '../git';
 vi.mock('fs', async importOriginal => {
   const actual = await importOriginal<typeof import('fs')>();
   return {
@@ -46,6 +46,13 @@ import {
   clearReleaseConfigCache,
 } from '../changelog';
 import { type TestCommit } from './fixtures/changelog';
+
+/** Mocks `Commit.authors`: the git author first, then `Co-authored-by` logins. */
+function commitAuthors(coAuthors: string[] = []) {
+  return {
+    nodes: [{ user: null }, ...coAuthors.map(login => ({ user: { login } }))],
+  };
+}
 
 const getConfigFileDirMock = config.getConfigFileDir as MockedFunction<
   typeof config.getConfigFileDir
@@ -97,10 +104,11 @@ describe('generateChangesetFromGit', () => {
 
     mockClient.mockResolvedValueOnce({
       repository: Object.fromEntries(
-        commits.map(({ hash, author, title, pr }: TestCommit) => [
+        commits.map(({ hash, author, coAuthors, title, pr }: TestCommit) => [
           `C${hash}`,
           {
             author: { user: author },
+            authors: commitAuthors(coAuthors),
             associatedPullRequests: {
               nodes: pr?.remote
                 ? [
@@ -166,6 +174,35 @@ describe('generateChangesetFromGit', () => {
     }
   });
 
+  it('counts a commit that only quotes the skip magic word in code', async () => {
+    // Squash-merged feature commit that documents the magic word, wrapped
+    // across lines as git does, next to a real skipped bump commit.
+    setup(
+      [
+        {
+          hash: 'abcdef1234567890',
+          title: 'feat(publish): Add development version bump',
+          body:
+            'It then commits `meta: Bump new\n' +
+            'development version` + `#skip-changelog` with `--all`.',
+        },
+        {
+          hash: 'bcdef1234567890a',
+          title: 'meta: Bump new development version',
+          body: '#skip-changelog',
+        },
+      ],
+      null,
+    );
+
+    const result = await generateChangesetFromGit(dummyGit, '1.0.0');
+
+    expect(result.totalCommits).toBe(1);
+    expect(result.bumpType).toBe('minor');
+    expect(result.changelog).toContain('Add development version bump');
+    expect(result.changelog).not.toContain('Bump new development version');
+  });
+
   // ============================================================================
   // Basic output formatting tests - use snapshots
   // ============================================================================
@@ -181,6 +218,7 @@ describe('generateChangesetFromGit', () => {
       policy: ChangelogPolicy.Auto,
       scopeGrouping: true,
       includePaths: [],
+      unownedPaths: 'include' as const,
       aiSummary: {
         llm: {
           endpoint: 'https://api.githubcopilot.com/responses',
@@ -188,6 +226,7 @@ describe('generateChangesetFromGit', () => {
           apiKeyEnv: 'AI_SUMMARY_TOKEN',
         },
         minItems: 5,
+        timeout: 120,
         levels: ['release', 'category', 'scope'] as (
           'release' | 'category' | 'scope'
         )[],
@@ -198,13 +237,22 @@ describe('generateChangesetFromGit', () => {
       provider.mockImplementation(async request => {
         const input = JSON.parse(request.input);
         return {
-          summaries: input.nodes
-            .map((node: any) => ({
-              id: node.id,
-              summary: `${input.level} summary for ${node.title}`,
-              importantChanges: [],
-            }))
-            .reverse(),
+          summaries: Object.fromEntries(
+            input.nodes
+              .map((node: any) => ({
+                id: node.id,
+                ...(input.level === 'release'
+                  ? { coveredPartIds: node.parts.map((part: any) => part.id) }
+                  : {}),
+                summary:
+                  input.level === 'release'
+                    ? 'One concise overview of release capabilities.'
+                    : `${input.level} summary for ${node.title} changes.`,
+                importantChanges: [],
+              }))
+              .reverse()
+              .map(({ id, ...digest }: any) => [id, digest]),
+          ),
         };
       });
     });
@@ -267,11 +315,69 @@ describe('generateChangesetFromGit', () => {
           input.nodes[0].parts.map((part: any) => part.text).join(''),
         ).toContain(title);
         // Our simulated model omits all critical facts: reject the whole attempt.
-        expect(result.changelog).not.toContain('release summary');
+        expect(result.changelog).not.toContain(
+          'One concise overview of release capabilities.',
+        );
         expect(result.changelog).not.toContain('<details>');
         expect(result.bumpType).toBe(title.includes('!') ? 'major' : 'patch');
       },
     );
+
+    it('gives the model condensed PR descriptions without rendering them', async () => {
+      vi.mocked(config.getChangelogConfig).mockReturnValue({
+        ...summaryConfig,
+        aiSummary: {
+          ...summaryConfig.aiSummary,
+          minItems: 0,
+          levels: ['release'],
+        },
+      });
+      setup(
+        [
+          {
+            hash: 'abcdef1234567890',
+            title: 'feat(nuget): Add workspaces',
+            body: '',
+            pr: {
+              local: '1',
+              remote: {
+                number: '1',
+                title: 'feat(nuget): Add workspaces',
+                body: '<!-- template -->\nPublishes   projects\nin dependency order.',
+              },
+            },
+          },
+          {
+            hash: 'bcdef12345678901',
+            title: 'fix: Custom entry',
+            body: '',
+            pr: {
+              local: '2',
+              remote: {
+                number: '2',
+                title: 'fix: Custom entry',
+                body: 'Context.\n\n## Changelog Entry\n- Curated fix',
+              },
+            },
+          },
+        ],
+        null,
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0');
+      const texts = provider.mock.calls
+        .map(([request]) => JSON.parse(request.input))
+        .filter(input => input.level === 'scope')
+        .flatMap(input => input.nodes)
+        .flatMap(node => node.parts.map((part: any) => part.text));
+      expect(texts).toContainEqual(
+        expect.stringMatching(
+          /Add workspaces.*\nPR description: Publishes projects in dependency order\.$/,
+        ),
+      );
+      const custom = texts.find(text => text.includes('Curated fix'));
+      expect(custom).not.toContain('PR description');
+      expect(result.changelog).not.toContain('dependency order');
+    });
 
     it('carries a valid critical digest through every reduction and keeps custom originals', async () => {
       vi.mocked(config.getChangelogConfig).mockReturnValue({
@@ -281,21 +387,31 @@ describe('generateChangesetFromGit', () => {
       provider.mockImplementation(async request => {
         const input = JSON.parse(request.input);
         return {
-          summaries: input.nodes.map((node: any) => ({
-            id: node.id,
-            summary: 'General maintenance.',
-            importantChanges: node.parts.flatMap((part: any) => [
-              ...(part.importantChanges || []),
-              ...(part.important
-                ? [
-                    {
-                      id: part.sourceId,
-                      summary: 'Breaking change: legacy endpoint removed.',
-                    },
-                  ]
-                : []),
-            ]),
-          })),
+          summaries: Object.fromEntries(
+            input.nodes
+              .map((node: any) => ({
+                id: node.id,
+                ...(input.level === 'release'
+                  ? { coveredPartIds: node.parts.map((part: any) => part.id) }
+                  : {}),
+                summary:
+                  input.level === 'release'
+                    ? 'The API drops an obsolete endpoint.'
+                    : 'Removed the legacy endpoint in a breaking API change.',
+                importantChanges: node.parts.flatMap((part: any) => [
+                  ...(part.importantChanges || []),
+                  ...(part.important
+                    ? [
+                        {
+                          id: part.sourceId,
+                          summary: 'Breaking change: legacy endpoint removed.',
+                        },
+                      ]
+                    : []),
+                ]),
+              }))
+              .map(({ id, ...digest }: any) => [id, digest]),
+          ),
         };
       });
       setup(
@@ -319,25 +435,27 @@ describe('generateChangesetFromGit', () => {
       const result = await generateChangesetFromGit(dummyGit, '1.0.0');
       expect(provider).toHaveBeenCalledTimes(3);
       expect(result.changelog.split('### Breaking Changes')[0]).toContain(
-        'Breaking change: legacy endpoint removed.',
+        'The API drops an obsolete endpoint.',
       );
       expect(result.changelog).toContain('- Remove legacy endpoint');
-      expect(result.changelog).toContain('<details>');
+      expect(result.changelog).not.toContain('<details>');
       expect(result.bumpType).toBe('major');
     });
 
     it('keeps category and scope prose visible while preserving every original entry and semver', async () => {
       setup(commits, null);
       const result = await generateChangesetFromGit(dummyGit, '1.0.0');
-      expect(result.changelog).toContain('release summary for New Features ✨');
       expect(result.changelog).toContain(
-        '### New Features ✨\n\ncategory summary for New Features ✨\n\n#### Cli',
+        'One concise overview of release capabilities.',
       );
       expect(result.changelog).toContain(
-        '#### Cli\n\nscope summary for New Features ✨ / Cli\n\n<details>',
+        '### New Features ✨\n\ncategory summary for New Features ✨ changes.\n\n#### Cli',
       );
-      expect(result.changelog.match(/<details>/g)).toHaveLength(1);
-      expect(result.changelog.match(/Show 6 items/g)).toHaveLength(1);
+      expect(result.changelog).toContain(
+        '#### Cli\n\nscope summary for New Features ✨ / Cli changes.\n\n- Add command 1',
+      );
+      expect(result.changelog).not.toContain('<details>');
+      expect(result.changelog).not.toContain('<summary>Show');
       for (let i = 1; i <= 6; i++)
         expect(
           result.changelog.match(
@@ -366,30 +484,24 @@ describe('generateChangesetFromGit', () => {
       });
       setup(commits, null);
       const result = await generateChangesetFromGit(dummyGit, '1.0.0');
-      expect(result.changelog.includes('release summary')).toBe(
-        levels.includes('release'),
-      );
+      expect(
+        result.changelog.includes(
+          'One concise overview of release capabilities.',
+        ),
+      ).toBe(levels.includes('release'));
       expect(result.changelog.includes('category summary')).toBe(
         levels.includes('category'),
       );
       expect(result.changelog.includes('scope summary')).toBe(
         levels.includes('scope'),
       );
-      // Every displayed scope remains outside any collapsed original entries.
       expect(result.changelog).toContain('#### Cli');
-      expect(result.changelog.indexOf('#### Cli')).toBeLessThan(
-        result.changelog.indexOf('<details>') === -1
-          ? Infinity
-          : result.changelog.indexOf('<details>'),
-      );
-      if (levels.length === 1 && levels[0] === 'release') {
-        expect(result.changelog).not.toContain('<details>');
-        for (let i = 1; i <= 6; i++)
-          expect(result.changelog).toContain(`- Add command ${i}`);
-      }
+      expect(result.changelog).not.toContain('<details>');
+      for (let i = 1; i <= 6; i++)
+        expect(result.changelog).toContain(`- Add command ${i}`);
     });
 
-    it('renders a prose overview of at most three paragraphs covering every category', async () => {
+    it('renders one AI synthesis over all category digests without stitching paragraphs', async () => {
       vi.mocked(config.getChangelogConfig).mockReturnValue({
         ...summaryConfig,
         aiSummary: {
@@ -412,16 +524,22 @@ describe('generateChangesetFromGit', () => {
       );
       const result = await generateChangesetFromGit(dummyGit, '1.0.0');
       const overview = result.changelog.split('### ')[0].trim();
-      expect(overview.split('\n\n')).toHaveLength(3);
+      expect(overview).toBe('One concise overview of release capabilities.');
       expect(overview).not.toMatch(/\*\*|^[-#]/m);
       for (let i = 0; i < 10; i++) {
-        expect(overview).toContain(`release summary for Category ${i}`);
         expect(result.changelog).toContain(`Add capability ${i}`);
       }
+      const releaseInput = provider.mock.calls
+        .map(([request]) => JSON.parse(request.input))
+        .find(input => input.level === 'release');
+      expect(releaseInput.nodes).toHaveLength(1);
+      expect(
+        releaseInput.nodes[0].parts.map((part: any) => part.title),
+      ).toEqual(Array.from({ length: 10 }, (_, i) => `Category ${i}`));
       expect(result.changelog).not.toContain('<details>');
     });
 
-    it('folds unsummarized scopes and unscoped entries once beneath visible category prose', async () => {
+    it('keeps unsummarized scopes and unscoped entries expanded beneath category prose', async () => {
       setup(
         [
           ...commits,
@@ -433,22 +551,15 @@ describe('generateChangesetFromGit', () => {
       );
       const result = await generateChangesetFromGit(dummyGit, '1.0.0');
       expect(result.changelog).toContain(
-        'category summary for New Features ✨\n\n#### Api\n\n<details>',
+        'category summary for New Features ✨ changes.\n\n#### Api\n\n- Add endpoint 1',
       );
       expect(result.changelog).toContain(
-        '#### Cli\n\nscope summary for New Features ✨ / Cli\n\n<details>',
+        '#### Cli\n\nscope summary for New Features ✨ / Cli changes.\n\n- Add command 1',
       );
       expect(result.changelog).not.toContain(
         'scope summary for New Features ✨ / Api',
       );
-      expect(result.changelog.match(/<details>/g)).toHaveLength(3);
-      let depth = 0;
-      for (const [tag] of result.changelog.matchAll(/<details>|<\/details>/g)) {
-        depth += tag === '<details>' ? 1 : -1;
-        expect(depth).toBeGreaterThanOrEqual(0);
-        expect(depth).toBeLessThanOrEqual(1);
-      }
-      expect(depth).toBe(0);
+      expect(result.changelog).not.toContain('<details>');
       for (const title of [
         'Add endpoint 1',
         'Add endpoint 2',
@@ -457,6 +568,37 @@ describe('generateChangesetFromGit', () => {
         expect(result.changelog.split(title)).toHaveLength(2);
       expect(result.totalCommits).toBe(9);
       expect(result.bumpType).toBe('minor');
+    });
+
+    it('preserves author-provided details without adding AI accordion wrappers', async () => {
+      vi.mocked(config.getChangelogConfig).mockReturnValue({
+        ...summaryConfig,
+        aiSummary: { ...summaryConfig.aiSummary, minItems: 0 },
+      });
+      setup(
+        [
+          {
+            hash: 'abcdef1234567890',
+            title: 'feat(cli): Add command',
+            body: '',
+            pr: {
+              local: '1',
+              remote: {
+                number: '1',
+                title: 'feat(cli): Add command',
+                body: '## Changelog Entry\n\n- Add command\n\n<details>\n<summary>Author notes</summary>\n\nKeep this original text.\n\n</details>',
+              },
+            },
+          },
+        ],
+        null,
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0');
+      expect(result.changelog.match(/<details>/g)).toHaveLength(1);
+      expect(result.changelog).toContain('<summary>Author notes</summary>');
+      expect(result.changelog).toContain('Keep this original text.');
+      expect(result.changelog).not.toContain('<summary>Show');
+      expect(result.changelog).toContain('category summary');
     });
 
     it('keeps byte-for-byte original output when a later generation stage fails', async () => {
@@ -471,9 +613,11 @@ describe('generateChangesetFromGit', () => {
       setup(commits, null);
       provider
         .mockResolvedValueOnce({
-          summaries: [
-            { id: 'group:0/r0/b0', summary: 'scope', importantChanges: [] },
-          ],
+          summaries: Object.fromEntries(
+            [
+              { id: 'group:0/r0/b0', summary: 'scope.', importantChanges: [] },
+            ].map(({ id, ...digest }: any) => [id, digest]),
+          ),
         })
         .mockRejectedValueOnce(new Error('Unavailable'));
       expect(await generateChangesetFromGit(dummyGit, '1.0.0')).toEqual(
@@ -499,7 +643,9 @@ describe('generateChangesetFromGit', () => {
         100,
         true,
       );
-      expect(rendered.changelog).toContain('release summary');
+      expect(rendered.changelog).toContain(
+        'One concise overview of release capabilities.',
+      );
       expect(mockGetChangesSince).toHaveBeenCalledTimes(1);
     });
 
@@ -531,7 +677,7 @@ describe('generateChangesetFromGit', () => {
       expect(result.changelog).toContain('category summary');
       expect(result.changelog).not.toContain('#### Cli');
       expect(result.changelog).not.toContain('scope summary');
-      expect(result.changelog.match(/<details>/g)).toHaveLength(1);
+      expect(result.changelog).not.toContain('<details>');
     });
 
     it('leaves highlighted PR previews expanded and makes no model request', async () => {
@@ -700,6 +846,232 @@ describe('generateChangesetFromGit', () => {
       );
       const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
       expect(result.changelog).toMatchSnapshot();
+    });
+  });
+
+  describe('author credits', () => {
+    function junior(coAuthors: string[]): TestCommit {
+      return {
+        hash: 'abcdef1234567890',
+        title: 'Upgraded the kernel',
+        body: '',
+        coAuthors,
+        pr: {
+          remote: {
+            number: '123',
+            author: { login: 'sentry-junior', __typename: 'Bot' },
+          },
+        },
+      };
+    }
+
+    it('credits co-authors after the PR author without duplicates', async () => {
+      setup(
+        [
+          {
+            hash: 'abcdef1234567890',
+            title: 'Upgraded the kernel',
+            body: '',
+            coAuthors: ['bob', 'Alice', 'carol'],
+            pr: { remote: { number: '123', author: { login: 'alice' } } },
+          },
+        ],
+        null,
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(result.changelog).toContain(
+        'Upgraded the kernel by @alice, @bob and @carol in [#123]',
+      );
+    });
+
+    it('credits co-authors from every commit of a rebase-merged PR', async () => {
+      setup(
+        [
+          {
+            hash: 'abcdef1234567890',
+            title: 'Upgraded the kernel',
+            body: '',
+            coAuthors: ['bob'],
+            pr: { remote: { number: '123', author: { login: 'alice' } } },
+          },
+          {
+            hash: 'bcdef1234567890a',
+            title: 'Prepared the kernel',
+            body: '',
+            coAuthors: ['carol'],
+            pr: { remote: { number: '123', author: { login: 'alice' } } },
+          },
+        ],
+        null,
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(result.changelog).toContain(
+        'Upgraded the kernel by @alice, @bob and @carol in [#123]',
+      );
+    });
+
+    it('credits PR commit co-authors when the merged commit has none', async () => {
+      const commit = junior([]);
+      // GraphQL returns PR numbers as numbers
+      commit.pr!.remote!.number = 123 as unknown as string;
+      setup([commit], null);
+      mockClient.mockResolvedValueOnce({
+        repository: {
+          P123: {
+            commits: {
+              nodes: [
+                {
+                  commit: {
+                    authors: commitAuthors(['sentry-junior[bot]', 'BYK']),
+                  },
+                },
+                { commit: { authors: commitAuthors(['thomasjiangcy']) } },
+              ],
+            },
+          },
+        },
+      });
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(result.changelog).toContain(
+        'Upgraded the kernel by @BYK and @thomasjiangcy with @sentry-junior in [#123]',
+      );
+    });
+
+    it('keeps PR co-authors that load when another PR number fails', async () => {
+      setup(
+        [
+          junior([]),
+          {
+            hash: 'bcdef1234567890a',
+            title: 'Fixed the kernel',
+            body: '',
+            pr: { local: '999' },
+          },
+        ],
+        null,
+      );
+      mockClient.mockRejectedValueOnce(
+        Object.assign(new Error('Could not resolve to a PullRequest'), {
+          data: {
+            repository: {
+              P123: {
+                commits: {
+                  nodes: [{ commit: { authors: commitAuthors(['BYK']) } }],
+                },
+              },
+              P999: null,
+            },
+          },
+        }),
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(result.changelog).toContain(
+        'Upgraded the kernel by @BYK with @sentry-junior in [#123]',
+      );
+    });
+
+    it('does not read the PR when the merged commit has co-authors', async () => {
+      setup([junior(['jan-auer'])], null);
+      await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(mockClient).toHaveBeenCalledTimes(1);
+    });
+
+    it('collapses long author lists', async () => {
+      setup(
+        [
+          {
+            hash: 'abcdef1234567890',
+            title: 'Upgraded the kernel',
+            body: '',
+            coAuthors: ['bob', 'carol', 'dave'],
+            pr: { remote: { number: '123', author: { login: 'alice' } } },
+          },
+        ],
+        null,
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(result.changelog).toContain(
+        'Upgraded the kernel by @alice, @bob and 2 others in [#123]',
+      );
+    });
+
+    it('credits people before bots', async () => {
+      setup([junior(['sentry-junior[bot]', 'jan-auer'])], null);
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(result.changelog).toContain(
+        'Upgraded the kernel by @jan-auer with @sentry-junior in [#123]',
+      );
+    });
+
+    it('credits bot co-authors after people', async () => {
+      setup(
+        [
+          {
+            hash: 'abcdef1234567890',
+            title: 'Upgraded the kernel',
+            body: '',
+            coAuthors: ['some-bot[bot]'],
+            pr: { remote: { number: '123', author: { login: 'alice' } } },
+          },
+        ],
+        null,
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(result.changelog).toContain(
+        'Upgraded the kernel by @alice with @some-bot in [#123]',
+      );
+    });
+
+    it('credits a bot alone when it is the sole author', async () => {
+      setup(
+        [
+          {
+            hash: 'abcdef1234567890',
+            title: 'Bumped the kernel',
+            body: '',
+            pr: {
+              remote: {
+                number: '123',
+                author: { login: 'dependabot', __typename: 'Bot' },
+              },
+            },
+          },
+        ],
+        null,
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(result.changelog).toContain(
+        'Bumped the kernel by @dependabot in [#123]',
+      );
+    });
+
+    it('hides authors listed in hide_authors but keeps their PRs', async () => {
+      setup(
+        [junior(['sentry-junior[bot]', 'jan-auer'])],
+        `
+changelog:
+  hide_authors:
+    - sentry-junior[bot]
+`,
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(result.changelog).toContain(
+        'Upgraded the kernel by @jan-auer in [#123]',
+      );
+      expect(result.changelog).not.toContain('sentry-junior');
+    });
+
+    it('omits the credit when every author is hidden', async () => {
+      setup(
+        [junior([])],
+        `
+changelog:
+  hide_authors:
+    - sentry-junior
+`,
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 3);
+      expect(result.changelog).toContain('- Upgraded the kernel in [#123]');
     });
   });
 
@@ -1293,6 +1665,45 @@ changelog:
       expect(result.changelog).toContain('#### Api');
       expect(result.changelog).toContain('#### Other');
       expect(result.changelog).toContain('feat(ui): single ui feature');
+    });
+
+    it('does not show Other header when scope grouping is disabled', async () => {
+      vi.mocked(config.getChangelogConfig).mockReturnValue({
+        filePath: 'CHANGELOG.md',
+        policy: ChangelogPolicy.Auto,
+        scopeGrouping: false,
+        includePaths: [],
+        unownedPaths: 'include',
+        aiSummary: false,
+      });
+      setup(
+        [
+          {
+            hash: 'abc123',
+            title: 'feat(api): api feature 1',
+            body: '',
+            pr: {
+              local: '1',
+              remote: { number: '1', author: { login: 'alice' } },
+            },
+          },
+          {
+            hash: 'def456',
+            title: 'feat(api): api feature 2',
+            body: '',
+            pr: {
+              local: '2',
+              remote: { number: '2', author: { login: 'bob' } },
+            },
+          },
+        ],
+        SCOPE_CONFIG,
+      );
+      const result = await generateChangesetFromGit(dummyGit, '1.0.0', 10);
+      expect(result.changelog).not.toContain('#### Api');
+      expect(result.changelog).not.toContain('#### Other');
+      expect(result.changelog).toContain('feat(api): api feature 1');
+      expect(result.changelog).toContain('feat(api): api feature 2');
     });
 
     it('does not show Other header when only scopeless entries exist', async () => {
@@ -1960,7 +2371,7 @@ See incident report: https://example.com/incident/123`,
 describe('generateChangelogWithHighlight', () => {
   let mockGraphqlClient: Mock;
   let mockRestClient: {
-    pulls: { get: Mock };
+    pulls: { get: Mock; listFiles: Mock };
     issues: { listLabelsOnIssue: Mock };
   };
   const mockGetChangesSince = getChangesSince as MockedFunction<
@@ -1976,7 +2387,7 @@ describe('generateChangelogWithHighlight', () => {
     clearReleaseConfigCache();
     mockGraphqlClient = vi.fn();
     mockRestClient = {
-      pulls: { get: vi.fn() },
+      pulls: { get: vi.fn(), listFiles: vi.fn() },
       issues: { listLabelsOnIssue: vi.fn() },
     };
     (getGitHubClient as MockedFunction<typeof getGitHubClient>).mockReturnValue(
@@ -2041,29 +2452,32 @@ describe('generateChangelogWithHighlight', () => {
     // Mock GraphQL for commit info
     mockGraphqlClient.mockResolvedValueOnce({
       repository: Object.fromEntries(
-        existingCommits.map(({ hash, author, title, pr }: TestCommit) => [
-          `C${hash}`,
-          {
-            author: { user: author },
-            associatedPullRequests: {
-              nodes: pr?.remote
-                ? [
-                    {
-                      author: pr.remote.author,
-                      number: pr.remote.number,
-                      title: pr.remote.title ?? title,
-                      body: pr.remote.body || '',
-                      labels: {
-                        nodes: (pr.remote.labels || []).map(label => ({
-                          name: label,
-                        })),
+        existingCommits.map(
+          ({ hash, author, coAuthors, title, pr }: TestCommit) => [
+            `C${hash}`,
+            {
+              author: { user: author },
+              authors: commitAuthors(coAuthors),
+              associatedPullRequests: {
+                nodes: pr?.remote
+                  ? [
+                      {
+                        author: pr.remote.author,
+                        number: pr.remote.number,
+                        title: pr.remote.title ?? title,
+                        body: pr.remote.body || '',
+                        labels: {
+                          nodes: (pr.remote.labels || []).map(label => ({
+                            name: label,
+                          })),
+                        },
                       },
-                    },
-                  ]
-                : [],
+                    ]
+                  : [],
+              },
             },
-          },
-        ]),
+          ],
+        ),
       ),
     });
 
@@ -2086,6 +2500,31 @@ describe('generateChangelogWithHighlight', () => {
       }
     }
   }
+
+  it('credits co-authors of the current PR', async () => {
+    setup({
+      currentPR: { number: 7, title: 'feat: Add thing', author: 'alice' },
+      existingCommits: [{ hash: 'abc123', title: 'fix: Older fix', body: '' }],
+    });
+    mockGraphqlClient.mockResolvedValueOnce({
+      repository: {
+        P7: {
+          commits: {
+            nodes: [
+              { commit: { authors: commitAuthors(['bob']) } },
+              { commit: { authors: commitAuthors(['carol']) } },
+            ],
+          },
+        },
+      },
+    });
+
+    const result = await generateChangelogWithHighlight(dummyGit, '1.0.0', 7);
+
+    expect(result.changelog).toContain(
+      'Add thing by **alice**, **bob** and **carol** in',
+    );
+  });
 
   describe('revert handling in PR preview', () => {
     it('cancels out revert PR with its target commit', async () => {
@@ -2455,6 +2894,76 @@ describe('generateChangelogWithHighlight', () => {
       expect(result.changelog).toBe('');
       expect(result.prSkipped).toBe(true);
       expect(result.bumpType).toBe('patch');
+    });
+  });
+
+  describe('with a workspace selected', () => {
+    const mockFilter = getWorkspaceChangeFilter as MockedFunction<
+      typeof getWorkspaceChangeFilter
+    >;
+
+    it('leaves out a PR that changes no workspace files', async () => {
+      setup({
+        currentPR: { number: 5, title: 'feat(server): Add endpoint' },
+        existingCommits: [],
+      });
+      const belongsToWorkspace = vi.fn(() => false);
+      mockFilter.mockResolvedValue(belongsToWorkspace);
+      mockRestClient.pulls.listFiles.mockResolvedValueOnce({
+        data: [{ filename: 'server/src/main.rs' }],
+      });
+
+      const result = await generateChangelogWithHighlight(dummyGit, '1.0.0', 5);
+
+      expect(result).toMatchObject({
+        changelog: '',
+        bumpType: null,
+        prOutsideWorkspace: true,
+      });
+      expect(belongsToWorkspace).toHaveBeenCalledWith(['server/src/main.rs']);
+      expect(dummyGit.fetch).not.toHaveBeenCalled();
+    });
+
+    it('checks every page of changed files, including renamed paths', async () => {
+      setup({
+        currentPR: { number: 5, title: 'feat(py): Add client option' },
+        existingCommits: [
+          { hash: 'abc123', title: 'fix(py): Older fix (#4)', body: '' },
+        ],
+      });
+      const belongsToWorkspace = vi.fn(() => true);
+      mockFilter.mockResolvedValue(belongsToWorkspace);
+      const firstPage = Array.from({ length: 100 }, (_, i) => ({
+        filename: `docs/${i}.md`,
+      }));
+      mockRestClient.pulls.listFiles
+        .mockResolvedValueOnce({ data: firstPage })
+        .mockResolvedValueOnce({
+          data: [
+            {
+              filename: 'clients/python/new.py',
+              previous_filename: 'clients/rust/old.rs',
+            },
+          ],
+        });
+
+      const result = await generateChangelogWithHighlight(dummyGit, '1.0.0', 5);
+
+      expect(mockRestClient.pulls.listFiles).toHaveBeenCalledTimes(2);
+      expect(mockRestClient.pulls.listFiles).toHaveBeenLastCalledWith(
+        expect.objectContaining({ pull_number: 5, page: 2 }),
+      );
+      expect(belongsToWorkspace).toHaveBeenCalledWith([
+        ...firstPage.map(({ filename }) => filename),
+        'clients/python/new.py',
+        'clients/rust/old.rs',
+      ]);
+      expect(result.prOutsideWorkspace).toBeUndefined();
+      expect(result.bumpType).toBe('minor');
+      expect(result.changelog).toContain('Older fix');
+      // The PR's own entry leaves out the rest of the changelog
+      expect(result.prEntry).toContain('Add client option');
+      expect(result.prEntry).not.toContain('Older fix');
     });
   });
 });

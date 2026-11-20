@@ -485,7 +485,6 @@ describe('GitHub Artifact Provider', () => {
     test('it should filter artifacts by revision name server-side', async () => {
       // Listing all artifacts of a repository can fail with HTTP 500 on
       // repositories with many artifacts, so the API must be asked to filter
-      // by name (see https://github.com/getsentry/craft/issues/879).
       mockClient.actions.listArtifactsForRepo.mockResolvedValueOnce({
         status: 200,
         data: {

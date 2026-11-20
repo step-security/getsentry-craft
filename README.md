@@ -7,7 +7,25 @@
 
 GitHub Action that automates the `craft prepare` release workflow — creates a release branch, bumps the version, generates a changelog, and opens a publish request issue.
 
-## Usage
+Craft is a command line tool that helps automate and pipeline package releases. It enforces a specific workflow for managing release branches, changelogs, and artifact publishing.
+
+## Configuration
+
+Create a `.craft.yml` in your project root:
+
+```yaml
+minVersion: '2.21.0'
+changelog:
+  policy: auto
+targets:
+  - name: github
+  - name: npm
+    access: public
+```
+
+See the [configuration reference](https://craft.sentry.dev/configuration/) for all options.
+
+## GitHub Actions
 
 ```yaml
 name: Release
@@ -20,45 +38,16 @@ on:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: step-security/getsentry-craft@v2
-        with:
-          version: ${{ github.event.inputs.version }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+    uses: step-security/getsentry-craft@v3
+    with:
+      version: ${{ inputs.version }}
+    secrets: inherit
 ```
 
-## Inputs
-
-| Input                            | Description                                                                      | Default                                       |
-| -------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------- |
-| `version`                        | Version to release (semver, `"auto"`, `"major"`, `"minor"`, `"patch"`)           | Uses `versioning.policy` from config          |
-| `merge_target`                   | Target branch to merge into                                                      | Default branch                                |
-| `force`                          | Force release even with blockers                                                 | `false`                                       |
-| `blocker_label`                  | Label that blocks releases                                                       | `release-blocker`                             |
-| `publish_repo`                   | Repository for publish issues. Use `"self"` to create issues in the source repo. | `{owner}/publish`                             |
-| `git_user_name`                  | Git committer name                                                               | `github.actor`                                |
-| `git_user_email`                 | Git committer email                                                              | `{actor_id}+{actor}@users.noreply.github.com` |
-| `path`                           | Path that Craft will run inside                                                  | `.`                                           |
-| `workspace`                      | Named Craft release workspace                                                    |                                               |
-| `craft_config_from_merge_target` | Use craft config from the merge target branch                                    | `false`                                       |
-| `craft_version`                  | Version of Craft to install                                                      | Action ref (e.g. `v2`)                        |
-
-## Outputs
-
-| Output           | Description                              |
-| ---------------- | ---------------------------------------- |
-| `version`        | The resolved version being released      |
-| `branch`         | The release branch name                  |
-| `sha`            | The commit SHA on the release branch     |
-| `previous_tag`   | The tag before this release              |
-| `changelog`      | The changelog for this release           |
-| `changelog_file` | Path to the full changelog file          |
-| `issue_url`      | URL of the created publish request issue |
+See [GitHub Actions](https://craft.sentry.dev/github-actions/) for all inputs,
+the composite action, and the changelog preview workflow.
 
 ## License
 
