@@ -164201,6 +164201,7 @@ var require_ready_state = __commonJS({
     __export2(ready_state_exports, {
       isAliasAssigned: () => isAliasAssigned,
       isAliasError: () => isAliasError,
+      isBlocked: () => isBlocked,
       isDone: () => isDone,
       isFailed: () => isFailed,
       isReady: () => isReady
@@ -164222,7 +164223,11 @@ var require_ready_state = __commonJS({
       }
       return state2.endsWith("_ERROR") || state2 === "ERROR";
     };
-    var isDone = (buildOrDeployment) => isReady(buildOrDeployment) || isFailed(buildOrDeployment);
+    var isBlocked = ({
+      readyState,
+      state: state2
+    }) => readyState === "BLOCKED" || state2 === "BLOCKED";
+    var isDone = (buildOrDeployment) => isReady(buildOrDeployment) || isFailed(buildOrDeployment) || isBlocked(buildOrDeployment);
     var isAliasAssigned = (deployment) => Boolean(deployment.aliasAssigned);
     var isAliasError = (deployment) => Boolean(deployment.aliasError);
   }
@@ -164673,7 +164678,7 @@ var require_package4 = __commonJS({
   "node_modules/@vercel/client/package.json"(exports2, module2) {
     module2.exports = {
       name: "@vercel/client",
-      version: "18.11.2",
+      version: "18.12.4",
       main: "dist/index.js",
       typings: "dist/index.d.ts",
       homepage: "https://vercel.com",
@@ -164710,9 +164715,9 @@ var require_package4 = __commonJS({
         querystring: "^0.2.0",
         "sleep-promise": "8.0.1",
         "tar-fs": "1.16.3",
+        "@vercel/build-utils": "15.5.0",
         "@vercel/error-utils": "2.2.1",
-        "@vercel/routing-utils": "6.6.1",
-        "@vercel/build-utils": "15.3.0"
+        "@vercel/routing-utils": "6.6.1"
       },
       scripts: {
         build: "node ../../utils/build.mjs",
@@ -168842,7 +168847,7 @@ globstar while`, file, fr3, pattern, pr4, swallowee), this.matchOne(file.slice(f
         let { pattern, functionConfig: fn4 } = match2, serviceName = typeof config?.serviceName == "string" && config.serviceName !== "" ? config.serviceName : void 0, consumer = sanitizeConsumerName(serviceName ? `${serviceName}~${pattern}` : pattern), experimentalTriggers = fn4.experimentalTriggers?.map((trigger) => trigger.type === "queue/v2beta" ? { ...trigger, consumer } : trigger);
         if (experimentalTriggers && experimentalTriggers.length > 1 && experimentalTriggers.some((t3) => t3.type === "queue/v2beta")) throw new Error(`functions["${pattern}"].experimentalTriggers can only have one item for queue/v2beta`);
         if (isScheduleEntrypoint && experimentalTriggers !== void 0 && !(experimentalTriggers.length === 1 && experimentalTriggers[0]?.type === "schedule/v1beta")) throw new Error(`functions["${pattern}"].experimentalTriggers conflicts with the schedule entrypoint trigger`);
-        return { architecture: fn4.architecture, memory: fn4.memory, maxDuration: fn4.maxDuration, affinity: fn4.affinity, maxConcurrency: fn4.maxConcurrency, regions: fn4.regions, functionFailoverRegions: fn4.functionFailoverRegions, experimentalTriggers: isScheduleEntrypoint ? [{ type: "schedule/v1beta" }] : experimentalTriggers, supportsCancellation: fn4.supportsCancellation };
+        return { architecture: fn4.architecture, memory: fn4.memory, maxDuration: fn4.maxDuration, affinity: fn4.affinity, maxConcurrency: fn4.maxConcurrency, regions: fn4.regions, functionFailoverRegions: fn4.functionFailoverRegions, experimentalTriggers: isScheduleEntrypoint ? [{ type: "schedule/v1beta" }] : experimentalTriggers, supportsCancellation: fn4.supportsCancellation, perimeter: fn4.perimeter };
       }
       return isScheduleEntrypoint ? { experimentalTriggers: [{ type: "schedule/v1beta" }] } : {};
     }
@@ -168851,6 +168856,7 @@ globstar while`, file, fr3, pattern, pr4, swallowee), this.matchOne(file.slice(f
     var import_yazl;
     var import_minimatch;
     var import_fs_extra3;
+    var PERIMETER_ID_PATTERN;
     var Lambda2;
     var sema;
     var mtime;
@@ -168861,9 +168867,10 @@ globstar while`, file, fr3, pattern, pr4, swallowee), this.matchOne(file.slice(f
       import_async_sema3 = __toESM2(require_async_sema()), import_yazl = __toESM2(require_yazl()), import_minimatch = __toESM2(require_minimatch2()), import_fs_extra3 = __toESM2(require_lib14());
       init_download();
       init_stream_to_buffer();
+      PERIMETER_ID_PATTERN = /^pmtr_[a-z0-9]{28}$/;
       Lambda2 = class {
         constructor(opts) {
-          let { handler: handler15, runtime: runtime2, runtimeLanguage, maxDuration, affinity, maxConcurrency, architecture, memory, environment = {}, allowQuery, regions, functionFailoverRegions, supportsMultiPayloads, supportsWrapper, supportsResponseStreaming, experimentalResponseStreaming, operationType, framework, experimentalTriggers, supportsCancellation, shouldDisableAutomaticFetchInstrumentation } = opts;
+          let { handler: handler15, runtime: runtime2, runtimeLanguage, maxDuration, affinity, maxConcurrency, architecture, memory, environment = {}, allowQuery, regions, functionFailoverRegions, supportsMultiPayloads, supportsWrapper, supportsResponseStreaming, experimentalResponseStreaming, operationType, framework, experimentalTriggers, supportsCancellation, perimeter, shouldDisableAutomaticFetchInstrumentation } = opts;
           if ("files" in opts && (0, import_assert5.default)(typeof opts.files == "object", '"files" must be an object'), "zipBuffer" in opts && (0, import_assert5.default)(Buffer.isBuffer(opts.zipBuffer), '"zipBuffer" must be a Buffer'), (0, import_assert5.default)(typeof handler15 == "string", '"handler" is not a string'), (0, import_assert5.default)(typeof runtime2 == "string", '"runtime" is not a string'), (0, import_assert5.default)(typeof environment == "object", '"environment" is not an object'), architecture !== void 0 && (0, import_assert5.default)(architecture === "x86_64" || architecture === "arm64", '"architecture" must be either "x86_64" or "arm64"'), runtimeLanguage !== void 0 && (0, import_assert5.default)(runtimeLanguage === "rust" || runtimeLanguage === "go", '"runtimeLanguage" is invalid. Valid options: "rust", "go"'), "experimentalAllowBundling" in opts && opts.experimentalAllowBundling !== void 0 && (0, import_assert5.default)(typeof opts.experimentalAllowBundling == "boolean", '"experimentalAllowBundling" is not a boolean'), memory !== void 0 && (0, import_assert5.default)(typeof memory == "number", '"memory" is not a number'), maxDuration !== void 0 && (0, import_assert5.default)(typeof maxDuration == "number" || maxDuration === "max", '"maxDuration" is not a number or "max"'), affinity !== void 0 && (0, import_assert5.default)(typeof affinity == "object" && affinity !== null && affinity.mode === "strict" && Object.keys(affinity).length === 1, '"affinity" must be an object with only `mode: "strict"`'), validateMaxConcurrency(maxConcurrency), allowQuery !== void 0 && ((0, import_assert5.default)(Array.isArray(allowQuery), '"allowQuery" is not an Array'), (0, import_assert5.default)(allowQuery.every((q7) => typeof q7 == "string"), '"allowQuery" is not a string Array')), supportsMultiPayloads !== void 0 && (0, import_assert5.default)(typeof supportsMultiPayloads == "boolean", '"supportsMultiPayloads" is not a boolean'), supportsWrapper !== void 0 && (0, import_assert5.default)(typeof supportsWrapper == "boolean", '"supportsWrapper" is not a boolean'), regions !== void 0 && ((0, import_assert5.default)(Array.isArray(regions), '"regions" is not an Array'), (0, import_assert5.default)(regions.every((r13) => typeof r13 == "string"), '"regions" is not a string Array')), functionFailoverRegions !== void 0 && ((0, import_assert5.default)(Array.isArray(functionFailoverRegions), '"functionFailoverRegions" is not an Array'), (0, import_assert5.default)(functionFailoverRegions.every((r13) => typeof r13 == "string"), '"functionFailoverRegions" is not a string Array')), framework !== void 0 && ((0, import_assert5.default)(typeof framework == "object", '"framework" is not an object'), (0, import_assert5.default)(typeof framework.slug == "string", '"framework.slug" is not a string'), framework.version !== void 0 && (0, import_assert5.default)(typeof framework.version == "string", '"framework.version" is not a string')), experimentalTriggers !== void 0) {
             (0, import_assert5.default)(Array.isArray(experimentalTriggers), '"experimentalTriggers" is not an Array');
             for (let i6 = 0; i6 < experimentalTriggers.length; i6++) {
@@ -168871,7 +168878,7 @@ globstar while`, file, fr3, pattern, pr4, swallowee), this.matchOne(file.slice(f
               (0, import_assert5.default)(typeof trigger == "object" && trigger !== null, `${prefix} is not an object`), (0, import_assert5.default)(trigger.type === "queue/v1beta" || trigger.type === "queue/v2beta" || trigger.type === "schedule/v1beta", `${prefix}.type must be "queue/v1beta", "queue/v2beta", or "schedule/v1beta"`), (trigger.type === "queue/v1beta" || trigger.type === "queue/v2beta") && ((0, import_assert5.default)(typeof trigger.topic == "string", `${prefix}.topic is required and must be a string`), (0, import_assert5.default)(trigger.topic.length > 0, `${prefix}.topic cannot be empty`), (0, import_assert5.default)(typeof trigger.consumer == "string", `${prefix}.consumer is required and must be a string`), (0, import_assert5.default)(trigger.consumer.length > 0, `${prefix}.consumer cannot be empty`), trigger.maxDeliveries !== void 0 && ((0, import_assert5.default)(typeof trigger.maxDeliveries == "number", `${prefix}.maxDeliveries must be a number`), (0, import_assert5.default)(Number.isInteger(trigger.maxDeliveries) && trigger.maxDeliveries >= 1, `${prefix}.maxDeliveries must be at least 1`)), trigger.retryAfterSeconds !== void 0 && ((0, import_assert5.default)(typeof trigger.retryAfterSeconds == "number", `${prefix}.retryAfterSeconds must be a number`), (0, import_assert5.default)(trigger.retryAfterSeconds > 0, `${prefix}.retryAfterSeconds must be a positive number`)), trigger.initialDelaySeconds !== void 0 && ((0, import_assert5.default)(typeof trigger.initialDelaySeconds == "number", `${prefix}.initialDelaySeconds must be a number`), (0, import_assert5.default)(trigger.initialDelaySeconds >= 0, `${prefix}.initialDelaySeconds must be a non-negative number`)), trigger.maxConcurrency !== void 0 && ((0, import_assert5.default)(typeof trigger.maxConcurrency == "number", `${prefix}.maxConcurrency must be a number`), (0, import_assert5.default)(Number.isInteger(trigger.maxConcurrency) && trigger.maxConcurrency >= 1, `${prefix}.maxConcurrency must be at least 1`)));
             }
           }
-          supportsCancellation !== void 0 && (0, import_assert5.default)(typeof supportsCancellation == "boolean", '"supportsCancellation" is not a boolean'), this.type = "Lambda", this.operationType = operationType, this.files = "files" in opts ? opts.files : void 0, this.handler = handler15, this.runtime = runtime2, this.runtimeLanguage = runtimeLanguage, this.architecture = getDefaultLambdaArchitecture(architecture), this.memory = memory, this.maxDuration = maxDuration, this.affinity = affinity, this.maxConcurrency = maxConcurrency, this.environment = environment, this.allowQuery = allowQuery, this.regions = regions, this.functionFailoverRegions = functionFailoverRegions, this.zipBuffer = "zipBuffer" in opts ? opts.zipBuffer : void 0, this.supportsMultiPayloads = supportsMultiPayloads, this.supportsWrapper = supportsWrapper, this.supportsResponseStreaming = supportsResponseStreaming ?? experimentalResponseStreaming, this.framework = framework, this.experimentalAllowBundling = "experimentalAllowBundling" in opts ? opts.experimentalAllowBundling : void 0, this.experimentalTriggers = experimentalTriggers, this.supportsCancellation = supportsCancellation, this.shouldDisableAutomaticFetchInstrumentation = shouldDisableAutomaticFetchInstrumentation;
+          supportsCancellation !== void 0 && (0, import_assert5.default)(typeof supportsCancellation == "boolean", '"supportsCancellation" is not a boolean'), perimeter !== void 0 && (0, import_assert5.default)(typeof perimeter == "string" && PERIMETER_ID_PATTERN.test(perimeter), '"perimeter" must be a perimeter ID ("pmtr_" followed by 28 lowercase letters or digits)'), this.type = "Lambda", this.operationType = operationType, this.files = "files" in opts ? opts.files : void 0, this.handler = handler15, this.runtime = runtime2, this.runtimeLanguage = runtimeLanguage, this.architecture = getDefaultLambdaArchitecture(architecture), this.memory = memory, this.maxDuration = maxDuration, this.affinity = affinity, this.maxConcurrency = maxConcurrency, this.environment = environment, this.allowQuery = allowQuery, this.regions = regions, this.functionFailoverRegions = functionFailoverRegions, this.zipBuffer = "zipBuffer" in opts ? opts.zipBuffer : void 0, this.supportsMultiPayloads = supportsMultiPayloads, this.supportsWrapper = supportsWrapper, this.supportsResponseStreaming = supportsResponseStreaming ?? experimentalResponseStreaming, this.framework = framework, this.experimentalAllowBundling = "experimentalAllowBundling" in opts ? opts.experimentalAllowBundling : void 0, this.experimentalTriggers = experimentalTriggers, this.supportsCancellation = supportsCancellation, this.perimeter = perimeter, this.shouldDisableAutomaticFetchInstrumentation = shouldDisableAutomaticFetchInstrumentation;
         }
         async createZip() {
           let { zipBuffer } = this;
@@ -173363,7 +173370,7 @@ ${codeblock}`, options);
       }
       return null;
     }
-    async function readConfigFile(files) {
+    async function readConfigFile(files, { silent = false } = {}) {
       files = Array.isArray(files) ? files : [files];
       for (let name of files) {
         let data = await readFileOrNull(name);
@@ -173377,7 +173384,7 @@ ${codeblock}`, options);
               return import_js_yaml7.default.safeLoadAll(str2, (doc) => docs.push(doc), { filename: name }), docs.at(-1) ?? null;
             }
           } catch {
-            console.log(`Error while parsing config file: "${name}"`);
+            silent || console.log(`Error while parsing config file: "${name}"`);
           }
         }
       }
@@ -174380,7 +174387,7 @@ ${codeblock}`, options);
           if (usedPin && pin) {
             let pinField = pin.source === "devEngines" ? "package.json#devEngines.packageManager" : `package.json#packageManager ${packageJsonPackageManager}`;
             console.log(`Detected \`${detectedLockfile}\` ${versionString}generated by ${detectedPackageManager} from ${pinField}`);
-          } else console.log(usedEnginesSelector ? `Detected \`${detectedLockfile}\` ${versionString}generated by ${detectedPackageManager} from package.json#engines.pnpm ${packageJsonEngines?.pnpm}` : detectedV9PnpmLockfile ? `Detected \`${detectedLockfile}\` ${lockfileVersion} which may be generated by pnpm@9.x, pnpm@10.x, or pnpm@11.x
+          } else console.log(usedEnginesSelector ? `Detected \`${detectedLockfile}\` ${versionString}generated by ${detectedPackageManager} from package.json#engines.pnpm ${packageJsonEngines?.pnpm}` : detectedV9PnpmLockfile ? `Detected \`${detectedLockfile}\` ${lockfileVersion} which may be generated by pnpm@9.x, pnpm@10.x, pnpm@11.x, or pnpm@12.x
 Using ${detectedPackageManager} based on project creation date
 To use a different version, set package.json#packageManager or package.json#devEngines.packageManager` : `Detected \`${detectedLockfile}\` ${versionString}generated by ${detectedPackageManager}`);
         }
@@ -175014,7 +175021,7 @@ To use a different version, set package.json#packageManager or package.json#devE
       "use strict";
       EdgeFunction = class {
         constructor(params) {
-          this.type = "EdgeFunction", this.name = params.name, this.deploymentTarget = params.deploymentTarget, this.entrypoint = params.entrypoint, this.files = params.files, this.assets = params.assets, this.regions = params.regions, this.framework = params.framework, this.environment = params.environment;
+          this.type = "EdgeFunction", this.name = params.name, this.deploymentTarget = params.deploymentTarget, this.entrypoint = params.entrypoint, this.files = params.files, this.assets = params.assets, this.regions = params.regions, this.framework = params.framework, this.environment = params.environment, this.perimeter = params.perimeter;
         }
       };
     } });
@@ -175026,7 +175033,7 @@ To use a different version, set package.json#packageManager or package.json#devE
       init_max_concurrency();
       ContainerImage = class {
         constructor(params) {
-          validateMaxConcurrency(params.maxConcurrency), this.type = "ContainerImage", this.files = params.files, this.handler = params.handler, this.runtime = params.runtime, this.command = params.command, this.environment = params.environment ?? {}, this.architecture = params.architecture, this.memory = params.memory, this.maxDuration = params.maxDuration, this.affinity = params.affinity, this.maxConcurrency = params.maxConcurrency, this.regions = params.regions, this.functionFailoverRegions = params.functionFailoverRegions, this.experimentalTriggers = params.experimentalTriggers, this.supportsCancellation = params.supportsCancellation;
+          validateMaxConcurrency(params.maxConcurrency), this.type = "ContainerImage", this.files = params.files, this.handler = params.handler, this.runtime = params.runtime, this.command = params.command, this.environment = params.environment ?? {}, this.architecture = params.architecture, this.memory = params.memory, this.maxDuration = params.maxDuration, this.affinity = params.affinity, this.maxConcurrency = params.maxConcurrency, this.regions = params.regions, this.functionFailoverRegions = params.functionFailoverRegions, this.experimentalTriggers = params.experimentalTriggers, this.supportsCancellation = params.supportsCancellation, this.perimeter = params.perimeter;
         }
       };
     } });
@@ -175082,7 +175089,7 @@ To use a different version, set package.json#packageManager or package.json#devE
       "use strict";
       init_max_duration();
       init_max_concurrency();
-      triggerEventSchemaV1 = { type: "object", properties: { type: { type: "string", const: "queue/v1beta" }, topic: { type: "string", minLength: 1 }, consumer: { type: "string", minLength: 1 }, maxDeliveries: { type: "number", minimum: 1 }, retryAfterSeconds: { type: "number", exclusiveMinimum: 0 }, initialDelaySeconds: { type: "number", minimum: 0 }, maxConcurrency: { type: "number", minimum: 1 } }, required: ["type", "topic", "consumer"], additionalProperties: false }, triggerEventSchemaV2 = { type: "object", properties: { type: { type: "string", const: "queue/v2beta" }, topic: { type: "string", minLength: 1 }, maxDeliveries: { type: "number", minimum: 1 }, retryAfterSeconds: { type: "number", exclusiveMinimum: 0 }, initialDelaySeconds: { type: "number", minimum: 0 }, maxConcurrency: { type: "number", minimum: 1 } }, required: ["type", "topic"], additionalProperties: false }, scheduleTriggerEventSchemaV1 = { type: "object", properties: { type: { type: "string", const: "schedule/v1beta" } }, required: ["type"], additionalProperties: false }, triggerEventSchema = { oneOf: [triggerEventSchemaV1, triggerEventSchemaV2, scheduleTriggerEventSchemaV1] }, getFunctionsSchema = () => ({ type: "object", minProperties: 1, maxProperties: 50, additionalProperties: false, patternProperties: { "^.{1,256}$": { type: "object", additionalProperties: false, properties: { architecture: { type: "string", enum: ["x86_64", "arm64"] }, runtime: { type: "string", maxLength: 256 }, memory: { minimum: 128, maximum: 10240 }, maxDuration: getMaxDurationSchema(), affinity: { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { type: "string", const: "strict" } } }, maxConcurrency: { type: "integer", minimum: 1, maximum: MAX_CONCURRENCY }, regions: { type: "array", items: { type: "string" } }, functionFailoverRegions: { type: "array", items: { type: "string" } }, includeFiles: { type: "string", maxLength: 256 }, excludeFiles: { type: "string", maxLength: 256 }, installCommand: { type: "string", maxLength: 256 }, experimentalTriggers: { type: "array", items: triggerEventSchema }, supportsCancellation: { type: "boolean" } } } } }), functionsSchema = getFunctionsSchema(), buildsSchema = { type: "array", minItems: 0, maxItems: 128, items: { type: "object", additionalProperties: false, required: ["use"], properties: { src: { type: "string", minLength: 1, maxLength: 4096 }, use: { type: "string", minLength: 3, maxLength: 256 }, config: { type: "object" } } } }, packageManifestSchema = { type: "object", required: ["runtime", "dependencies"], additionalProperties: false, properties: { version: { type: "string", description: 'Manifest schema version, e.g. "20260304".' }, runtime: { type: "string", description: 'Runtime identifier, e.g. "python", "node".' }, framework: { type: "string", description: 'Detected framework slug, e.g. "fastapi", "flask", "hono".' }, serviceType: { type: "string", description: 'Deployment topology for service builds: "web", "schedule", "queue", or "workflow".' }, buildType: { type: "string", enum: ["app", "api-dir", "middleware"], description: 'What triggered this build: "app" (full application build), "api-dir" (api/ directory build), or "middleware" (middleware build).' }, runtimeVersion: { type: "object", additionalProperties: false, required: ["resolved"], properties: { requested: { type: "string", description: 'Version constraint from the project manifest, e.g. ">=3.10".' }, requestedSource: { type: "string", description: 'File that declared the constraint, e.g. "pyproject.toml".' }, resolved: { type: "string", description: 'Actual resolved version, e.g. "3.12".' } } }, dependencies: { type: "array", items: { type: "object", required: ["name", "type", "scopes", "resolved"], additionalProperties: false, properties: { name: { type: "string" }, type: { type: "string", enum: ["direct", "transitive", "peer"] }, scopes: { type: "array", items: { type: "string" }, description: 'Dependency groups this package belongs to, e.g. ["main", "dev"].' }, requested: { type: "string", description: 'Version specifier as declared, e.g. "flask>=2.0".' }, resolved: { type: "string", description: 'Resolved version, e.g. "3.1.0".' }, source: { type: "string", description: 'Package source type, e.g. "registry", "git", "path".' }, sourceUrl: { type: "string", description: 'Source URL, e.g. "https://pypi.org".' } } } } } };
+      triggerEventSchemaV1 = { type: "object", properties: { type: { type: "string", const: "queue/v1beta" }, topic: { type: "string", minLength: 1 }, consumer: { type: "string", minLength: 1 }, maxDeliveries: { type: "number", minimum: 1 }, retryAfterSeconds: { type: "number", exclusiveMinimum: 0 }, initialDelaySeconds: { type: "number", minimum: 0 }, maxConcurrency: { type: "number", minimum: 1 } }, required: ["type", "topic", "consumer"], additionalProperties: false }, triggerEventSchemaV2 = { type: "object", properties: { type: { type: "string", const: "queue/v2beta" }, topic: { type: "string", minLength: 1 }, maxDeliveries: { type: "number", minimum: 1 }, retryAfterSeconds: { type: "number", exclusiveMinimum: 0 }, initialDelaySeconds: { type: "number", minimum: 0 }, maxConcurrency: { type: "number", minimum: 1 } }, required: ["type", "topic"], additionalProperties: false }, scheduleTriggerEventSchemaV1 = { type: "object", properties: { type: { type: "string", const: "schedule/v1beta" } }, required: ["type"], additionalProperties: false }, triggerEventSchema = { oneOf: [triggerEventSchemaV1, triggerEventSchemaV2, scheduleTriggerEventSchemaV1] }, getFunctionsSchema = () => ({ type: "object", minProperties: 1, maxProperties: 50, additionalProperties: false, patternProperties: { "^.{1,256}$": { type: "object", additionalProperties: false, properties: { architecture: { type: "string", enum: ["x86_64", "arm64"] }, runtime: { type: "string", maxLength: 256 }, memory: { minimum: 128, maximum: 10240 }, maxDuration: getMaxDurationSchema(), affinity: { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { type: "string", const: "strict" } } }, maxConcurrency: { type: "integer", minimum: 1, maximum: MAX_CONCURRENCY }, regions: { type: "array", items: { type: "string" } }, functionFailoverRegions: { type: "array", items: { type: "string" } }, includeFiles: { type: "string", maxLength: 256 }, excludeFiles: { type: "string", maxLength: 256 }, installCommand: { type: "string", maxLength: 256 }, experimentalTriggers: { type: "array", items: triggerEventSchema }, supportsCancellation: { type: "boolean" }, perimeter: { type: "string", pattern: "^pmtr_[a-z0-9]{28}$" } } } } }), functionsSchema = getFunctionsSchema(), buildsSchema = { type: "array", minItems: 0, maxItems: 128, items: { type: "object", additionalProperties: false, required: ["use"], properties: { src: { type: "string", minLength: 1, maxLength: 4096 }, use: { type: "string", minLength: 3, maxLength: 256 }, config: { type: "object" } } } }, packageManifestSchema = { type: "object", required: ["runtime", "dependencies"], additionalProperties: false, properties: { version: { type: "string", description: 'Manifest schema version, e.g. "20260304".' }, runtime: { type: "string", description: 'Runtime identifier, e.g. "python", "node".' }, framework: { type: "string", description: 'Detected framework slug, e.g. "fastapi", "flask", "hono".' }, serviceType: { type: "string", description: 'Deployment topology for service builds: "web", "schedule", "queue", or "workflow".' }, buildType: { type: "string", enum: ["app", "api-dir", "middleware", "daemon"], description: 'What triggered this build: "app" (full application build), "api-dir" (api/ directory build), "middleware" (middleware build), or "daemon" (vercel.json daemon build).' }, runtimeVersion: { type: "object", additionalProperties: false, required: ["resolved"], properties: { requested: { type: "string", description: 'Version constraint from the project manifest, e.g. ">=3.10".' }, requestedSource: { type: "string", description: 'File that declared the constraint, e.g. "pyproject.toml".' }, resolved: { type: "string", description: 'Actual resolved version, e.g. "3.12".' } } }, dependencies: { type: "array", items: { type: "object", required: ["name", "type", "scopes", "resolved"], additionalProperties: false, properties: { name: { type: "string" }, type: { type: "string", enum: ["direct", "transitive", "peer"] }, scopes: { type: "array", items: { type: "string" }, description: 'Dependency groups this package belongs to, e.g. ["main", "dev"].' }, requested: { type: "string", description: 'Version specifier as declared, e.g. "flask>=2.0".' }, resolved: { type: "string", description: 'Resolved version, e.g. "3.1.0".' }, source: { type: "string", description: 'Package source type, e.g. "registry", "git", "path".' }, sourceUrl: { type: "string", description: 'Source URL, e.g. "https://pypi.org".' } } } } } };
     } });
     var package_manifest_exports = {};
     __export2(package_manifest_exports, { MANIFEST_FILENAME: () => MANIFEST_FILENAME, MANIFEST_VERSION: () => MANIFEST_VERSION, createDiagnostics: () => createDiagnostics, manifestPath: () => manifestPath, writeProjectManifest: () => writeProjectManifest });
@@ -178294,27 +178301,43 @@ ${entrypointsForMessage}`);
       "use strict";
       INTERNAL_SERVICE_PREFIX = "/_svc", SERVICE_NAME_PATTERN = "^[a-z]([a-z_-]*[a-z])?$";
     } });
-    var schedule_path_utils_exports = {};
-    __export2(schedule_path_utils_exports, { SCHEDULE_FUNCTION_PREFIX: () => SCHEDULE_FUNCTION_PREFIX, getScheduleFunctionPath: () => getScheduleFunctionPath });
-    function getScheduleFunctionPath(entrypointSegments) {
-      if (entrypointSegments.length === 0 || entrypointSegments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\"))) throw new Error("Schedule function paths require safe, non-empty segments");
-      return [SCHEDULE_FUNCTION_PREFIX, ...entrypointSegments].join("/");
-    }
-    var SCHEDULE_FUNCTION_PREFIX;
-    var init_schedule_path_utils = __esm2({ "src/schedule-path-utils.ts"() {
-      "use strict";
-      SCHEDULE_FUNCTION_PREFIX = "_vercel/schedules";
-    } });
     var schedules_exports = {};
-    __export2(schedules_exports, { getNamedSchedules: () => getNamedSchedules, toScheduleRecord: () => toScheduleRecord });
+    __export2(schedules_exports, { SCHEDULES_FUNCTION_PATH: () => SCHEDULES_FUNCTION_PATH, getNamedSchedules: () => getNamedSchedules, getScheduleFunction: () => getScheduleFunction, getServiceScheduleName: () => getServiceScheduleName, isServiceSchedule: () => isServiceSchedule, toScheduleRecord: () => toScheduleRecord });
+    function isServiceSchedule(schedule2) {
+      return "entrypoint" in schedule2 || "run" in schedule2;
+    }
     function getNamedSchedules(schedules) {
       return Object.entries(schedules ?? {}).map(([name, schedule2]) => ({ name, ...schedule2 }));
+    }
+    function getServiceScheduleName(service, name) {
+      let deployedName = `${service}.${name}`;
+      return deployedName.length <= MAX_SCHEDULE_NAME_LENGTH && SCHEDULE_NAME_RE.test(deployedName) ? { deployedName } : { deployedName, error: `the schedule name "${deployedName}" is invalid. Names can have at most ${MAX_SCHEDULE_NAME_LENGTH} characters, and contain only letters, numbers, ".", "_" and "-".` };
+    }
+    function formatMaxDuration(seconds) {
+      return seconds % 3600 === 0 ? `${seconds / 3600}h` : seconds % 60 === 0 ? `${seconds / 60}m` : `${seconds}s`;
+    }
+    function getScheduleFunction(maxDuration, regions) {
+      let sortedRegions = regions && [...new Set(regions)].sort(), parts = [...sortedRegions ?? [], ...maxDuration === null ? [] : [formatMaxDuration(maxDuration)]], path92 = [SCHEDULES_FUNCTION_PATH, ...parts].join("-");
+      if (!(sortedRegions ?? []).every((region) => REGION_ID_RE.test(region)) || path92.length > MAX_FUNCTION_NAME_LENGTH) {
+        let hash = (0, import_crypto11.createHash)("sha256").update(JSON.stringify([maxDuration, sortedRegions])).digest("hex").slice(0, 8);
+        path92 = `${SCHEDULES_FUNCTION_PATH}-${hash}`;
+      }
+      return { path: path92, ...maxDuration !== null && { maxDuration }, ...sortedRegions !== null && { regions: sortedRegions } };
     }
     function toScheduleRecord(schedules) {
       return Object.fromEntries(schedules.map(({ name, ...schedule2 }) => [name, schedule2]));
     }
+    var import_crypto11;
+    var SCHEDULE_NAME_RE;
+    var MAX_SCHEDULE_NAME_LENGTH;
+    var SCHEDULES_FUNCTION_PATH;
+    var REGION_ID_RE;
+    var MAX_FUNCTION_NAME_LENGTH;
     var init_schedules = __esm2({ "src/schedules.ts"() {
       "use strict";
+      import_crypto11 = require("crypto");
+      SCHEDULE_NAME_RE = /^[0-9A-Za-z][0-9A-Za-z._-]*$/, MAX_SCHEDULE_NAME_LENGTH = 256;
+      SCHEDULES_FUNCTION_PATH = "schedules", REGION_ID_RE = /^[a-z]{3}[0-9]$/, MAX_FUNCTION_NAME_LENGTH = 64;
     } });
     var dockerfile_entrypoint_exports = {};
     __export2(dockerfile_entrypoint_exports, { DOCKERFILE_STAGE_HINT: () => DOCKERFILE_STAGE_HINT, isValidDockerfileStage: () => isValidDockerfileStage, splitDockerfileEntrypoint: () => splitDockerfileEntrypoint });
@@ -178351,7 +178374,7 @@ ${entrypointsForMessage}`);
     async function streamToDigestAsync(stream) {
       return await new Promise((resolve42, reject) => {
         stream.once("error", reject);
-        let count = 0, sha2562 = (0, import_crypto11.createHash)("sha256"), md53 = (0, import_crypto11.createHash)("md5");
+        let count = 0, sha2562 = (0, import_crypto22.createHash)("sha256"), md53 = (0, import_crypto22.createHash)("md5");
         stream.on("end", () => {
           let res = { sha256: sha2562.digest("hex"), md5: md53.digest("hex"), size: count };
           resolve42(res);
@@ -178365,12 +178388,12 @@ ${entrypointsForMessage}`);
       });
     }
     function sha256(value) {
-      return (0, import_crypto11.createHash)("sha256").update(value).digest("hex");
+      return (0, import_crypto22.createHash)("sha256").update(value).digest("hex");
     }
-    var import_crypto11;
+    var import_crypto22;
     var init_stream_to_digest_async = __esm2({ "src/fs/stream-to-digest-async.ts"() {
       "use strict";
-      import_crypto11 = require("crypto");
+      import_crypto22 = require("crypto");
     } });
     var EMPTY_DISCOVERY;
     var init_types22 = __esm2({ "src/static-files/types.ts"() {
@@ -178660,7 +178683,6 @@ ${entrypointsForMessage}`);
     var import_node_entrypoint;
     var load_import_node_entrypoint = () => import_node_entrypoint ??= (init_node_entrypoint(), __toCommonJS2(node_entrypoint_exports));
     __reExport(stdin_exports, (init_service_path_utils(), __toCommonJS2(service_path_utils_exports)), module2.exports);
-    __reExport(stdin_exports, (init_schedule_path_utils(), __toCommonJS2(schedule_path_utils_exports)), module2.exports);
     __reExport(stdin_exports, (init_schedules(), __toCommonJS2(schedules_exports)), module2.exports);
     __reExport(stdin_exports, (init_dockerfile_entrypoint(), __toCommonJS2(dockerfile_entrypoint_exports)), module2.exports);
     var import_daemons;
@@ -187101,6 +187123,7 @@ var require_utils7 = __commonJS({
       "notice",
       "tip",
       "canceled",
+      "blocked",
       // v1 Checks events
       "checks-registered",
       "checks-completed",
@@ -188036,6 +188059,10 @@ var require_check_deployment_status = __commonJS({
             debug5("Deployment state changed to CANCELED");
             finishedEvents.add("canceled");
             yield { type: "canceled", payload: deploymentUpdate };
+          }
+          if ((0, import_ready_state.isBlocked)(deploymentUpdate)) {
+            debug5("Deployment state changed to BLOCKED");
+            return yield { type: "blocked", payload: deploymentUpdate };
           }
           if ((0, import_ready_state.isReady)(deploymentUpdate) && !finishedEvents.has("ready")) {
             debug5("Deployment state changed to READY");
@@ -194096,6 +194123,7 @@ var require_collect_deployment_files = __commonJS({
     var __toCommonJS2 = (mod) => __copyProps2(__defProp2({}, "__esModule", { value: true }), mod);
     var collect_deployment_files_exports = {};
     __export2(collect_deployment_files_exports, {
+      addRootPageAlias: () => addRootPageAlias,
       assertDeploymentPath: () => assertDeploymentPath,
       collectDeploymentFiles: () => collectDeploymentFiles
     });
@@ -194164,7 +194192,32 @@ ${err.message}`;
         }
         throw err;
       }
+      if (clientOptions.servePageAtRoot && !clientOptions.prebuilt && clientOptions.archive !== "tgz" && typeof path17 === "string") {
+        addRootPageAlias(filesMap, isDirectory ? path17 : (0, import_path33.dirname)(path17), debug5);
+      }
       return { fileList, filesMap, workPath, isDirectory, ignoreList, warning: warning3 };
+    }
+    function addRootPageAlias(filesMap, root5, debug5) {
+      let page;
+      for (const file of filesMap.values()) {
+        for (const name of file.names) {
+          const rel = (0, import_path33.relative)(root5, name).split(import_path33.sep).join("/");
+          if (rel === "package.json" || rel === "middleware.js" || rel === "middleware.ts" || rel.startsWith("api/") || rel.startsWith("public/")) {
+            return;
+          }
+          const lower = rel.toLowerCase();
+          if (!lower.endsWith(".html") && !lower.endsWith(".htm"))
+            continue;
+          if (page || rel.includes("/") || rel === "index.html" || rel === "index.htm") {
+            return;
+          }
+          page = { names: file.names, name: rel };
+        }
+      }
+      if (!page)
+        return;
+      debug5(`Also uploading "${page.name}" as "index.html" so / serves it`);
+      page.names.push((0, import_path33.join)(root5, "index.html"));
     }
   }
 });
